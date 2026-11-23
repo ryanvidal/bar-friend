@@ -1,0 +1,579 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "7d12abdd1490d172c8a059bb7601dcca",
+    "entities": [
+      {
+        "tableName": "cocktails",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `barId` INTEGER NOT NULL, `slug` TEXT NOT NULL, `name` TEXT NOT NULL, `shortDescription` TEXT, `instructions` TEXT NOT NULL, `garnish` TEXT, `description` TEXT, `source` TEXT, `abv` REAL, `glassId` INTEGER, `glassName` TEXT, `methodId` INTEGER, `methodName` TEXT, `mainImageThumbUrl` TEXT, `mainImageUrl` TEXT, `isFavorite` INTEGER NOT NULL, `inBarShelf` INTEGER NOT NULL, `missingIngredientsCount` INTEGER NOT NULL, `tagsJson` TEXT NOT NULL, `utensilsJson` TEXT NOT NULL, `updatedAt` TEXT, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "barId",
+            "columnName": "barId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "slug",
+            "columnName": "slug",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "shortDescription",
+            "columnName": "shortDescription",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "instructions",
+            "columnName": "instructions",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "garnish",
+            "columnName": "garnish",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "description",
+            "columnName": "description",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "abv",
+            "columnName": "abv",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "glassId",
+            "columnName": "glassId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "glassName",
+            "columnName": "glassName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "methodId",
+            "columnName": "methodId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "methodName",
+            "columnName": "methodName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "mainImageThumbUrl",
+            "columnName": "mainImageThumbUrl",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "mainImageUrl",
+            "columnName": "mainImageUrl",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "isFavorite",
+            "columnName": "isFavorite",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "inBarShelf",
+            "columnName": "inBarShelf",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "missingIngredientsCount",
+            "columnName": "missingIngredientsCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "tagsJson",
+            "columnName": "tagsJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "utensilsJson",
+            "columnName": "utensilsJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_cocktails_barId_name",
+            "unique": false,
+            "columnNames": [
+              "barId",
+              "name"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_cocktails_barId_name` ON `${TABLE_NAME}` (`barId`, `name`)"
+          },
+          {
+            "name": "index_cocktails_barId_slug",
+            "unique": false,
+            "columnNames": [
+              "barId",
+              "slug"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_cocktails_barId_slug` ON `${TABLE_NAME}` (`barId`, `slug`)"
+          }
+        ]
+      },
+      {
+        "tableName": "cocktail_ingredients",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`cocktailId` INTEGER NOT NULL, `ingredientId` INTEGER NOT NULL, `ingredientSlug` TEXT NOT NULL, `ingredientName` TEXT NOT NULL, `sort` INTEGER NOT NULL, `amount` REAL, `amountMax` REAL, `units` TEXT, `optional` INTEGER NOT NULL, `note` TEXT, `inBarShelf` INTEGER NOT NULL, `substitutesJson` TEXT NOT NULL, PRIMARY KEY(`cocktailId`, `ingredientId`, `sort`), FOREIGN KEY(`cocktailId`) REFERENCES `cocktails`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "cocktailId",
+            "columnName": "cocktailId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ingredientId",
+            "columnName": "ingredientId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ingredientSlug",
+            "columnName": "ingredientSlug",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ingredientName",
+            "columnName": "ingredientName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sort",
+            "columnName": "sort",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "amount",
+            "columnName": "amount",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "amountMax",
+            "columnName": "amountMax",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "units",
+            "columnName": "units",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "optional",
+            "columnName": "optional",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "note",
+            "columnName": "note",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "inBarShelf",
+            "columnName": "inBarShelf",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "substitutesJson",
+            "columnName": "substitutesJson",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "cocktailId",
+            "ingredientId",
+            "sort"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_cocktail_ingredients_cocktailId",
+            "unique": false,
+            "columnNames": [
+              "cocktailId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_cocktail_ingredients_cocktailId` ON `${TABLE_NAME}` (`cocktailId`)"
+          },
+          {
+            "name": "index_cocktail_ingredients_ingredientId",
+            "unique": false,
+            "columnNames": [
+              "ingredientId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_cocktail_ingredients_ingredientId` ON `${TABLE_NAME}` (`ingredientId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "cocktails",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "cocktailId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "ingredients",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `barId` INTEGER NOT NULL, `slug` TEXT NOT NULL, `name` TEXT NOT NULL, `strength` REAL NOT NULL, `description` TEXT, `color` TEXT, `categoryName` TEXT, `parentIngredientId` INTEGER, `mainImageThumbUrl` TEXT, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "barId",
+            "columnName": "barId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "slug",
+            "columnName": "slug",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strength",
+            "columnName": "strength",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "description",
+            "columnName": "description",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "color",
+            "columnName": "color",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "categoryName",
+            "columnName": "categoryName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "parentIngredientId",
+            "columnName": "parentIngredientId",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "mainImageThumbUrl",
+            "columnName": "mainImageThumbUrl",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_ingredients_barId_name",
+            "unique": false,
+            "columnNames": [
+              "barId",
+              "name"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_ingredients_barId_name` ON `${TABLE_NAME}` (`barId`, `name`)"
+          }
+        ]
+      },
+      {
+        "tableName": "bar_shelf",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`barId` INTEGER NOT NULL, `ingredientId` INTEGER NOT NULL, PRIMARY KEY(`barId`, `ingredientId`))",
+        "fields": [
+          {
+            "fieldPath": "barId",
+            "columnName": "barId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ingredientId",
+            "columnName": "ingredientId",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "barId",
+            "ingredientId"
+          ]
+        }
+      },
+      {
+        "tableName": "shopping_list",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`barId` INTEGER NOT NULL, `ingredientId` INTEGER NOT NULL, `quantity` INTEGER NOT NULL, PRIMARY KEY(`barId`, `ingredientId`))",
+        "fields": [
+          {
+            "fieldPath": "barId",
+            "columnName": "barId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ingredientId",
+            "columnName": "ingredientId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "quantity",
+            "columnName": "quantity",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "barId",
+            "ingredientId"
+          ]
+        }
+      },
+      {
+        "tableName": "glasses",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `barId` INTEGER NOT NULL, `name` TEXT NOT NULL, `volume` REAL, `volumeUnits` TEXT, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "barId",
+            "columnName": "barId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "volume",
+            "columnName": "volume",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "volumeUnits",
+            "columnName": "volumeUnits",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_glasses_barId",
+            "unique": false,
+            "columnNames": [
+              "barId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_glasses_barId` ON `${TABLE_NAME}` (`barId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "cocktail_methods",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `barId` INTEGER NOT NULL, `name` TEXT NOT NULL, `dilutionPercentage` INTEGER, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "barId",
+            "columnName": "barId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dilutionPercentage",
+            "columnName": "dilutionPercentage",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_cocktail_methods_barId",
+            "unique": false,
+            "columnNames": [
+              "barId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_cocktail_methods_barId` ON `${TABLE_NAME}` (`barId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "tags",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `barId` INTEGER NOT NULL, `name` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "barId",
+            "columnName": "barId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_tags_barId",
+            "unique": false,
+            "columnNames": [
+              "barId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_tags_barId` ON `${TABLE_NAME}` (`barId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "sync_metadata",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key` TEXT NOT NULL, `lastSyncedEpochMillis` INTEGER NOT NULL, PRIMARY KEY(`key`))",
+        "fields": [
+          {
+            "fieldPath": "key",
+            "columnName": "key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSyncedEpochMillis",
+            "columnName": "lastSyncedEpochMillis",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "key"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '7d12abdd1490d172c8a059bb7601dcca')"
+    ]
+  }
+}
