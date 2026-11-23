@@ -30,6 +30,7 @@ kotlin {
             implementation(projects.core.model)
             implementation(projects.core.designsystem)
             implementation(projects.core.data)
+            implementation(projects.core.platform)
             implementation(libs.androidx.navigation3.runtime)
             implementation(libs.jetbrains.lifecycle.viewmodel.compose)
             implementation(libs.jetbrains.lifecycle.runtime.compose)

@@ -1,14 +1,28 @@
 package com.ryanvidal.barfriend.core.platform
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.pm.PackageManager
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.view.WindowManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -110,6 +124,55 @@ actual fun createSecureTokenStore(context: PlatformContext): SecureTokenStore =
 
 actual fun createPlatformPaths(context: PlatformContext): PlatformPaths =
     AndroidPlatformPaths(context.context.applicationContext)
+
+@Composable
+actual fun rememberLocalNetworkPermissionState(
+    onResult: (granted: Boolean) -> Unit,
+): LocalNetworkPermissionState {
+    if (Build.VERSION.SDK_INT < 37) {
+        return LocalNetworkPermissionState(
+            isRequired = false,
+            isGranted = true,
+            requestPermission = {},
+        )
+    }
+
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val currentOnResult by rememberUpdatedState(onResult)
+    var isGranted by remember {
+        mutableStateOf(
+            context.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        isGranted = granted
+        currentOnResult(granted)
+    }
+
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isGranted = context.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) ==
+                    PackageManager.PERMISSION_GRANTED
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    return LocalNetworkPermissionState(
+        isRequired = true,
+        isGranted = isGranted,
+        requestPermission = { launcher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK) },
+    )
+}
 
 @Composable
 actual fun KeepScreenOnEffect(enabled: Boolean) {

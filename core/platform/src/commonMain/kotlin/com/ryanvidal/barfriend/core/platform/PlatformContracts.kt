@@ -25,6 +25,17 @@ expect fun createSecureTokenStore(context: PlatformContext): SecureTokenStore
 
 expect fun createPlatformPaths(context: PlatformContext): PlatformPaths
 
+data class LocalNetworkPermissionState(
+    val isRequired: Boolean,
+    val isGranted: Boolean,
+    val requestPermission: () -> Unit,
+)
+
+@Composable
+expect fun rememberLocalNetworkPermissionState(
+    onResult: (granted: Boolean) -> Unit = {},
+): LocalNetworkPermissionState
+
 @Composable
 expect fun KeepScreenOnEffect(enabled: Boolean)
 

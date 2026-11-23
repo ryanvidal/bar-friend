@@ -199,6 +199,15 @@ actual fun createPlatformPaths(context: PlatformContext): PlatformPaths =
     IosPlatformPaths()
 
 @Composable
+actual fun rememberLocalNetworkPermissionState(
+    onResult: (granted: Boolean) -> Unit,
+): LocalNetworkPermissionState = LocalNetworkPermissionState(
+    isRequired = false,
+    isGranted = true,
+    requestPermission = {},
+)
+
+@Composable
 actual fun KeepScreenOnEffect(enabled: Boolean) {
     DisposableEffect(enabled) {
         if (enabled) {

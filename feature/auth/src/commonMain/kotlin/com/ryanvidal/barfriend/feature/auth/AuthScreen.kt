@@ -31,6 +31,7 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.Warning
+import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -60,10 +61,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation3.runtime.NavKey
 import com.ryanvidal.barfriend.core.data.ServerCheckResult
 import com.ryanvidal.barfriend.core.designsystem.StatusReadyGreen
+import com.ryanvidal.barfriend.core.platform.rememberLocalNetworkPermissionState
 import kotlinx.serialization.Serializable
 
 @Serializable
 data object AuthRoute : NavKey
+
+private enum class PendingAuthAction {
+    VERIFY,
+    SIGN_IN,
+}
 
 @Composable
 fun AuthScreen(
@@ -73,6 +80,17 @@ fun AuthScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var didSeedServerUrl by rememberSaveable(initialServerUrl) { mutableStateOf(false) }
+    var hasPromptedLocalNetwork by rememberSaveable { mutableStateOf(false) }
+    var pendingAction by rememberSaveable { mutableStateOf<PendingAuthAction?>(null) }
+
+    val localNetworkPermission = rememberLocalNetworkPermissionState { _ ->
+        when (pendingAction) {
+            PendingAuthAction.VERIFY -> viewModel.checkServer()
+            PendingAuthAction.SIGN_IN -> viewModel.signIn()
+            null -> Unit
+        }
+        pendingAction = null
+    }
 
     LaunchedEffect(initialServerUrl) {
         if (!didSeedServerUrl && !initialServerUrl.isNullOrBlank() && uiState.serverUrl.isBlank()) {
@@ -81,14 +99,30 @@ fun AuthScreen(
         didSeedServerUrl = true
     }
 
+    val runWithLocalNetworkCheck: (PendingAuthAction, () -> Unit) -> Unit = { action, proceed ->
+        if (localNetworkPermission.isRequired && !localNetworkPermission.isGranted && !hasPromptedLocalNetwork) {
+            hasPromptedLocalNetwork = true
+            pendingAction = action
+            localNetworkPermission.requestPermission()
+        } else {
+            proceed()
+        }
+    }
+
     AuthContent(
         uiState = uiState,
         onServerUrlChanged = viewModel::onServerUrlChanged,
         onEmailChanged = viewModel::onEmailChanged,
         onPasswordChanged = viewModel::onPasswordChanged,
         onTogglePasswordVisibility = viewModel::onTogglePasswordVisibility,
-        onCheckServerClick = viewModel::checkServer,
-        onSignInClick = viewModel::signIn,
+        onCheckServerClick = {
+            runWithLocalNetworkCheck(PendingAuthAction.VERIFY, viewModel::checkServer)
+        },
+        onSignInClick = {
+            runWithLocalNetworkCheck(PendingAuthAction.SIGN_IN, viewModel::signIn)
+        },
+        showLocalNetworkBanner = localNetworkPermission.isRequired && !localNetworkPermission.isGranted,
+        onGrantLocalNetworkClick = localNetworkPermission.requestPermission,
         modifier = modifier,
     )
 }
@@ -103,6 +137,8 @@ fun AuthContent(
     onCheckServerClick: () -> Unit,
     onSignInClick: () -> Unit,
     modifier: Modifier = Modifier,
+    showLocalNetworkBanner: Boolean = false,
+    onGrantLocalNetworkClick: () -> Unit = {},
 ) {
     val canSignIn = uiState.serverUrl.isNotBlank() &&
         uiState.email.isNotBlank() &&
@@ -150,6 +186,40 @@ fun AuthContent(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                AnimatedVisibility(visible = showLocalNetworkBanner) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 16.dp),
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Wifi,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Text(
+                                text = "Allow Local Network access to reach servers on Wi-Fi.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(
+                                onClick = onGrantLocalNetworkClick,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            ) {
+                                Text("Grant Access")
+                            }
+                        }
+                    }
+                }
                 Spacer(modifier = Modifier.height(28.dp))
 
                 OutlinedTextField(

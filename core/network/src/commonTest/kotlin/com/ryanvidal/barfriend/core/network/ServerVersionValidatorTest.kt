@@ -32,7 +32,13 @@ class ServerVersionValidatorTest {
     @Test
     fun `normalizes server urls consistently`() {
         assertEquals("https://bar.example.com", ServerUrlNormalizer.normalize("bar.example.com/"))
+        assertEquals("https://bar.thevidals.com/bar", ServerUrlNormalizer.normalize("bar.thevidals.com/bar/"))
         assertEquals("http://192.168.1.10:8080", ServerUrlNormalizer.normalize("http://192.168.1.10:8080/api/"))
+        assertEquals("http://192.168.50.198:8080", ServerUrlNormalizer.normalize("192.168.50.198:8080"))
+        assertEquals("http://172.16.0.5", ServerUrlNormalizer.normalize("172.16.0.5/"))
+        assertEquals("https://172.32.0.5", ServerUrlNormalizer.normalize("172.32.0.5"))
+        assertEquals("http://nas.local:3000", ServerUrlNormalizer.normalize("nas.local:3000"))
+        assertEquals("http://localhost:8080", ServerUrlNormalizer.normalize("localhost:8080"))
         assertEquals("https://bar.example.com/api", ServerUrlNormalizer.apiBaseUrl("https://bar.example.com/api"))
     }
 }
