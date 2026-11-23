@@ -26,6 +26,7 @@ import platform.CoreFoundation.kCFBooleanTrue
 import platform.CoreFoundation.kCFTypeDictionaryKeyCallBacks
 import platform.CoreFoundation.kCFTypeDictionaryValueCallBacks
 import platform.Foundation.NSApplicationSupportDirectory
+import platform.Foundation.NSCachesDirectory
 import platform.Foundation.NSData
 import platform.Foundation.NSDocumentDirectory
 import platform.Foundation.NSFileManager
@@ -171,6 +172,17 @@ private class IosPlatformPaths : PlatformPaths {
     override fun dataStorePath(name: String): String {
         val url = NSFileManager.defaultManager.URLForDirectory(
             directory = NSApplicationSupportDirectory,
+            inDomain = NSUserDomainMask,
+            appropriateForURL = null,
+            create = true,
+            error = null,
+        )
+        return requireNotNull(url?.path) + "/$name"
+    }
+
+    override fun cachePath(name: String): String {
+        val url = NSFileManager.defaultManager.URLForDirectory(
+            directory = NSCachesDirectory,
             inDomain = NSUserDomainMask,
             appropriateForURL = null,
             create = true,

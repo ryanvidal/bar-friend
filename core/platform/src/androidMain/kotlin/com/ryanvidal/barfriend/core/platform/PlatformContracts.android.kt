@@ -100,6 +100,9 @@ private class AndroidPlatformPaths(
 
     override fun dataStorePath(name: String): String =
         File(context.filesDir, "datastore/$name").absolutePath
+
+    override fun cachePath(name: String): String =
+        File(context.cacheDir, name).absolutePath
 }
 
 actual fun createSecureTokenStore(context: PlatformContext): SecureTokenStore =

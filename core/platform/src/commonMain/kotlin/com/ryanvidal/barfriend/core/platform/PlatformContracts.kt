@@ -18,6 +18,7 @@ interface SecureTokenStore {
 interface PlatformPaths {
     fun databasePath(name: String): String
     fun dataStorePath(name: String): String
+    fun cachePath(name: String): String
 }
 
 expect fun createSecureTokenStore(context: PlatformContext): SecureTokenStore

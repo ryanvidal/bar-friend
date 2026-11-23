@@ -35,6 +35,9 @@ data class CocktailDetail(
     val isFavorite: Boolean,
     val inBarShelf: Boolean,
     val missingIngredientsCount: Int,
+    val author: String? = null,
+    val originBar: String? = null,
+    val year: Int? = null,
 )
 
 data class CocktailIngredient(
@@ -49,8 +52,14 @@ data class CocktailIngredient(
     val optional: Boolean,
     val note: String?,
     val inBarShelf: Boolean,
+    val inBarShelfAsSubstitute: Boolean = false,
+    val inBarShelfAsVariant: Boolean = false,
+    val inBarShelfAsComplex: Boolean = false,
     val substitutes: List<IngredientSubstitute>,
-)
+) {
+    val isAvailableInBar: Boolean
+        get() = inBarShelf || inBarShelfAsSubstitute || inBarShelfAsVariant || inBarShelfAsComplex
+}
 
 data class IngredientSubstitute(
     val id: Int,

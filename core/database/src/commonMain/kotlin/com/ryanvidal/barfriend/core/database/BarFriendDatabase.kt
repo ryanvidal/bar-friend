@@ -17,6 +17,7 @@ import com.ryanvidal.barfriend.core.database.entity.IngredientEntity
 import com.ryanvidal.barfriend.core.database.entity.ShoppingListEntity
 import com.ryanvidal.barfriend.core.database.entity.SyncMetadataEntity
 import com.ryanvidal.barfriend.core.database.entity.TagEntity
+import com.ryanvidal.barfriend.core.database.entity.UtensilEntity
 import com.ryanvidal.barfriend.core.platform.PlatformContext
 import com.ryanvidal.barfriend.core.platform.PlatformPaths
 import dev.zacsweers.metro.AppScope
@@ -37,6 +38,7 @@ import kotlinx.coroutines.IO
         GlassEntity::class,
         CocktailMethodEntity::class,
         TagEntity::class,
+        UtensilEntity::class,
         SyncMetadataEntity::class,
     ],
     version = 1,

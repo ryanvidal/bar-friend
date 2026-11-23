@@ -11,6 +11,7 @@ import com.ryanvidal.barfriend.core.database.entity.IngredientEntity
 import com.ryanvidal.barfriend.core.database.entity.ShoppingListEntity
 import com.ryanvidal.barfriend.core.database.entity.SyncMetadataEntity
 import com.ryanvidal.barfriend.core.database.entity.TagEntity
+import com.ryanvidal.barfriend.core.database.entity.UtensilEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -70,6 +71,9 @@ interface CatalogDao {
     @Query("SELECT * FROM tags WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
     fun observeTags(barId: Int): Flow<List<TagEntity>>
 
+    @Query("SELECT * FROM utensils WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
+    fun observeUtensils(barId: Int): Flow<List<UtensilEntity>>
+
     @Upsert
     suspend fun upsertIngredients(ingredients: List<IngredientEntity>)
 
@@ -81,6 +85,24 @@ interface CatalogDao {
 
     @Upsert
     suspend fun upsertTags(tags: List<TagEntity>)
+
+    @Upsert
+    suspend fun upsertUtensils(utensils: List<UtensilEntity>)
+
+    @Query("DELETE FROM ingredients WHERE barId = :barId")
+    suspend fun clearIngredientsForBar(barId: Int)
+
+    @Query("DELETE FROM glasses WHERE barId = :barId")
+    suspend fun clearGlassesForBar(barId: Int)
+
+    @Query("DELETE FROM cocktail_methods WHERE barId = :barId")
+    suspend fun clearMethodsForBar(barId: Int)
+
+    @Query("DELETE FROM tags WHERE barId = :barId")
+    suspend fun clearTagsForBar(barId: Int)
+
+    @Query("DELETE FROM utensils WHERE barId = :barId")
+    suspend fun clearUtensilsForBar(barId: Int)
 
     @Query("SELECT lastSyncedEpochMillis FROM sync_metadata WHERE `key` = :key")
     suspend fun getSyncTimestamp(key: String): Long?

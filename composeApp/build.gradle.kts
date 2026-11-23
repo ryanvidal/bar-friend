@@ -60,6 +60,7 @@ kotlin {
             implementation(libs.jetbrains.lifecycle.viewmodel.navigation3)
             implementation(libs.jetbrains.window.core)
             implementation(libs.kotlinx.serialization.core)
+            implementation(libs.okio)
             implementation(libs.coil.compose)
             implementation(libs.coil.network.ktor3)
         }

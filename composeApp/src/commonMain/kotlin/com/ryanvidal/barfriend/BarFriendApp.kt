@@ -19,10 +19,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.NavEntry
@@ -41,24 +42,37 @@ import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
 import androidx.savedstate.serialization.SavedStateConfiguration
 import androidx.window.core.layout.WindowSizeClass
+import coil3.ImageLoader
+import coil3.compose.setSingletonImageLoaderFactory
+import coil3.disk.DiskCache
+import coil3.memory.MemoryCache
+import coil3.network.ktor3.KtorNetworkFetcherFactory
+import coil3.request.crossfade
 import com.ryanvidal.barfriend.core.data.SessionState
 import com.ryanvidal.barfriend.core.data.UserSettings
 import com.ryanvidal.barfriend.core.designsystem.BarFriendTheme
 import com.ryanvidal.barfriend.di.AppGraph
 import com.ryanvidal.barfriend.feature.auth.AuthRoute
 import com.ryanvidal.barfriend.feature.auth.AuthScreen
+import com.ryanvidal.barfriend.feature.auth.AuthViewModel
 import com.ryanvidal.barfriend.feature.cocktails.CocktailDetailRoute
 import com.ryanvidal.barfriend.feature.cocktails.CocktailDetailScreen
+import com.ryanvidal.barfriend.feature.cocktails.CocktailDetailViewModel
+import com.ryanvidal.barfriend.feature.cocktails.CocktailEditorRoute
+import com.ryanvidal.barfriend.feature.cocktails.CocktailEditorScreen
+import com.ryanvidal.barfriend.feature.cocktails.CocktailEditorViewModel
 import com.ryanvidal.barfriend.feature.cocktails.CocktailsListRoute
 import com.ryanvidal.barfriend.feature.cocktails.CocktailsListScreen
+import com.ryanvidal.barfriend.feature.cocktails.CocktailsListViewModel
 import com.ryanvidal.barfriend.feature.inventory.InventoryRoute
 import com.ryanvidal.barfriend.feature.inventory.InventoryScreen
 import com.ryanvidal.barfriend.feature.settings.SettingsRoute
 import com.ryanvidal.barfriend.feature.settings.SettingsScreen
-import kotlinx.coroutines.launch
+import com.ryanvidal.barfriend.feature.settings.SettingsViewModel
 import kotlinx.serialization.modules.SerializersModule
 import kotlinx.serialization.modules.polymorphic
 import kotlinx.serialization.modules.subclass
+import okio.Path.Companion.toPath
 
 private enum class BarFriendTab(
     val label: String,
@@ -76,6 +90,7 @@ private val BarFriendNavSavedStateConfig = SavedStateConfiguration {
             subclass(AuthRoute::class, AuthRoute.serializer())
             subclass(CocktailsListRoute::class, CocktailsListRoute.serializer())
             subclass(CocktailDetailRoute::class, CocktailDetailRoute.serializer())
+            subclass(CocktailEditorRoute::class, CocktailEditorRoute.serializer())
             subclass(InventoryRoute::class, InventoryRoute.serializer())
             subclass(SettingsRoute::class, SettingsRoute.serializer())
         }
@@ -84,9 +99,28 @@ private val BarFriendNavSavedStateConfig = SavedStateConfiguration {
 
 @Composable
 fun BarFriendApp(appGraph: AppGraph) {
+    setSingletonImageLoaderFactory { coilContext ->
+        ImageLoader.Builder(coilContext)
+            .components {
+                add(KtorNetworkFetcherFactory(httpClient = { appGraph.imageHttpClient.client }))
+            }
+            .memoryCache {
+                MemoryCache.Builder()
+                    .maxSizePercent(coilContext, percent = 0.25)
+                    .build()
+            }
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(appGraph.platformPaths.cachePath("coil3_image_cache").toPath())
+                    .maxSizeBytes(100L * 1024 * 1024)
+                    .build()
+            }
+            .crossfade(true)
+            .build()
+    }
+
     val settings by appGraph.appPreferences.settings.collectAsStateWithLifecycle(UserSettings())
     val sessionState by appGraph.sessionRepository.sessionState.collectAsStateWithLifecycle()
-    var previewShellUnlocked by rememberSaveable { mutableStateOf(false) }
 
     BarFriendTheme(themeMode = settings.themeMode) {
         when (val session = sessionState) {
@@ -99,42 +133,26 @@ fun BarFriendApp(appGraph: AppGraph) {
                 }
             }
             is SessionState.Unauthenticated -> {
-                if (previewShellUnlocked) {
-                    MainShell(
-                        appGraph = appGraph,
-                        settings = settings,
-                        onOpenAuth = { previewShellUnlocked = false },
-                    )
-                } else {
-                    AuthScreen(
-                        initialServerUrl = session.lastServerUrl,
-                        onConnectSubmitted = { _, _, _ ->
-                            previewShellUnlocked = true
-                        },
-                        onContinueOfflinePreview = {
-                            previewShellUnlocked = true
-                        },
-                    )
+                val authViewModel = viewModel(key = "auth") {
+                    AuthViewModel(appGraph.authRepository)
                 }
+                AuthScreen(
+                    viewModel = authViewModel,
+                    initialServerUrl = session.lastServerUrl,
+                )
             }
             is SessionState.Authenticated -> {
-                MainShell(
-                    appGraph = appGraph,
-                    settings = settings,
-                    onOpenAuth = { previewShellUnlocked = false },
-                )
+                LaunchedEffect(session.activeBarId) {
+                    appGraph.cocktailRepository.syncAll()
+                }
+                MainShell(appGraph = appGraph)
             }
         }
     }
 }
 
 @Composable
-private fun MainShell(
-    appGraph: AppGraph,
-    settings: UserSettings,
-    onOpenAuth: () -> Unit,
-) {
-    val coroutineScope = rememberCoroutineScope()
+private fun MainShell(appGraph: AppGraph) {
     var activeTab by rememberSaveable { mutableStateOf(BarFriendTab.COCKTAILS) }
 
     val cocktailsStack = rememberNavBackStack(BarFriendNavSavedStateConfig, CocktailsListRoute)
@@ -153,34 +171,71 @@ private fun MainShell(
         )
     }
 
-    val provider = remember(settings, onOpenAuth) {
+    val provider = remember(appGraph) {
         entryProvider<NavKey> {
             entry<CocktailsListRoute> {
+                val listViewModel = viewModel(key = "cocktails_list") {
+                    CocktailsListViewModel(appGraph.cocktailRepository)
+                }
                 CocktailsListScreen(
-                    onOpenSampleDetail = { id -> cocktailsStack.add(CocktailDetailRoute(id)) },
-                    onAddCocktail = { cocktailsStack.add(CocktailDetailRoute(0)) },
+                    viewModel = listViewModel,
+                    onOpenCocktail = { id -> cocktailsStack.add(CocktailDetailRoute(id)) },
+                    onAddRecipe = { cocktailsStack.add(CocktailEditorRoute()) },
+                    onImportFromUrl = { url ->
+                        cocktailsStack.add(CocktailEditorRoute(initialImportUrl = url))
+                    },
                 )
             }
             entry<CocktailDetailRoute> { route ->
+                val detailViewModel = viewModel(key = "cocktail_detail_${route.cocktailId}") {
+                    CocktailDetailViewModel(
+                        cocktailId = route.cocktailId,
+                        cocktailRepository = appGraph.cocktailRepository,
+                        appPreferences = appGraph.appPreferences,
+                    )
+                }
                 CocktailDetailScreen(
-                    cocktailId = route.cocktailId,
+                    viewModel = detailViewModel,
                     onBack = { cocktailsStack.removeLastOrNull() },
+                    onEditCocktail = { id ->
+                        cocktailsStack.add(CocktailEditorRoute(cocktailId = id))
+                    },
+                )
+            }
+            entry<CocktailEditorRoute> { route ->
+                val editorViewModel = viewModel(
+                    key = "cocktail_editor_${route.cocktailId}_${route.initialImportUrl}",
+                ) {
+                    CocktailEditorViewModel(
+                        cocktailId = route.cocktailId,
+                        initialImportUrl = route.initialImportUrl,
+                        cocktailRepository = appGraph.cocktailRepository,
+                    )
+                }
+                CocktailEditorScreen(
+                    viewModel = editorViewModel,
+                    onBack = { cocktailsStack.removeLastOrNull() },
+                    onSaved = { savedId ->
+                        cocktailsStack.removeLastOrNull()
+                        if (route.cocktailId == null && cocktailsStack.lastOrNull() !is CocktailDetailRoute) {
+                            cocktailsStack.add(CocktailDetailRoute(savedId))
+                        }
+                    },
                 )
             }
             entry<InventoryRoute> {
                 InventoryScreen()
             }
             entry<SettingsRoute> {
-                SettingsScreen(
-                    settings = settings,
-                    onUnitSelected = { unit ->
-                        coroutineScope.launch { appGraph.appPreferences.setPreferredUnit(unit) }
-                    },
-                    onThemeSelected = { mode ->
-                        coroutineScope.launch { appGraph.appPreferences.setThemeMode(mode) }
-                    },
-                    onOpenAuth = onOpenAuth,
-                )
+                val settingsViewModel = viewModel(key = "settings") {
+                    SettingsViewModel(
+                        appPreferences = appGraph.appPreferences,
+                        sessionRepository = appGraph.sessionRepository,
+                        authRepository = appGraph.authRepository,
+                        cocktailRepository = appGraph.cocktailRepository,
+                    )
+                }
+                SettingsScreen(viewModel = settingsViewModel)
             }
         }
     }
