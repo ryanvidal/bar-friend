@@ -137,6 +137,12 @@ class DefaultAuthRepository(
             barId = chosen.id,
             barName = chosen.name,
         )
+        runCatching { api.getProfile().id }
+            .onSuccess { userId ->
+                runCatching { sessionRepository.setActiveUserId(userId) }
+                    .onFailure { if (it is CancellationException) throw it }
+            }
+            .onFailure { if (it is CancellationException) throw it }
 
         return Result.success(
             Bar(

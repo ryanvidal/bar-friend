@@ -23,6 +23,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -54,6 +55,7 @@ import com.ryanvidal.barfriend.feature.cocktails.CocktailsListScreen
 import com.ryanvidal.barfriend.feature.cocktails.CocktailsListViewModel
 import com.ryanvidal.barfriend.feature.inventory.InventoryRoute
 import com.ryanvidal.barfriend.feature.inventory.InventoryScreen
+import com.ryanvidal.barfriend.feature.inventory.InventoryViewModel
 import com.ryanvidal.barfriend.feature.settings.SettingsRoute
 import com.ryanvidal.barfriend.feature.settings.SettingsScreen
 import com.ryanvidal.barfriend.feature.settings.SettingsViewModel
@@ -90,6 +92,7 @@ internal fun MainShell(
     activeBarId: Int?,
 ) {
     var activeTab by rememberSaveable { mutableStateOf(BarFriendTab.COCKTAILS) }
+    val latestActiveTab by rememberUpdatedState(activeTab)
     var nextEditorSessionId by rememberSaveable { mutableLongStateOf(1L) }
 
     val cocktailsStack = rememberNavBackStack(BarFriendNavSavedStateConfig, CocktailsListRoute)
@@ -108,7 +111,7 @@ internal fun MainShell(
         )
     }
 
-    val provider = remember(appGraph, cocktailsStack, activeBarId) {
+    val provider = remember(appGraph, backStacks, cocktailsStack, inventoryStack, activeBarId) {
         entryProvider<NavKey> {
             entry<CocktailsListRoute> {
                 val listViewModel = viewModel(key = "cocktails_list_${activeBarId ?: "none"}") {
@@ -147,16 +150,21 @@ internal fun MainShell(
                     CocktailDetailViewModel(
                         cocktailId = route.cocktailId,
                         cocktailRepository = appGraph.cocktailRepository,
+                        inventoryRepository = appGraph.inventoryRepository,
                         appPreferences = appGraph.appPreferences,
                     )
                 }
                 CocktailDetailScreen(
                     viewModel = detailViewModel,
-                    onBack = { popExpectedRoute(cocktailsStack, route) },
+                    onBack = {
+                        val ownerStack = backStacks.getValue(latestActiveTab)
+                        popExpectedRoute(ownerStack, route)
+                    },
                     onEditCocktail = { id ->
-                        if (cocktailsStack.lastOrNull() == route) {
+                        val ownerStack = backStacks.getValue(latestActiveTab)
+                        if (ownerStack.lastOrNull() == route) {
                             val sessionId = nextEditorSessionId++
-                            cocktailsStack.add(
+                            ownerStack.add(
                                 CocktailEditorRoute(
                                     cocktailId = id,
                                     sessionId = sessionId,
@@ -178,17 +186,35 @@ internal fun MainShell(
                 }
                 CocktailEditorScreen(
                     viewModel = editorViewModel,
-                    onBack = { popExpectedRoute(cocktailsStack, route) },
+                    onBack = {
+                        val ownerStack = backStacks.getValue(latestActiveTab)
+                        popExpectedRoute(ownerStack, route)
+                    },
                     onSaved = { savedId ->
-                        popExpectedRoute(cocktailsStack, route)
-                        if (route.cocktailId == null && cocktailsStack.lastOrNull() == CocktailsListRoute) {
-                            cocktailsStack.add(CocktailDetailRoute(savedId))
+                        val ownerStack = backStacks.getValue(latestActiveTab)
+                        popExpectedRoute(ownerStack, route)
+                        val top = ownerStack.lastOrNull()
+                        if (route.cocktailId == null && (top == CocktailsListRoute || top == InventoryRoute)) {
+                            ownerStack.add(CocktailDetailRoute(savedId))
                         }
                     },
                 )
             }
             entry<InventoryRoute> {
-                InventoryScreen()
+                val inventoryViewModel = viewModel(key = "inventory_${activeBarId ?: "none"}") {
+                    InventoryViewModel(
+                        inventoryRepository = appGraph.inventoryRepository,
+                        cocktailRepository = appGraph.cocktailRepository,
+                    )
+                }
+                InventoryScreen(
+                    viewModel = inventoryViewModel,
+                    onOpenCocktail = { id ->
+                        if (inventoryStack.lastOrNull() == InventoryRoute) {
+                            inventoryStack.add(CocktailDetailRoute(id))
+                        }
+                    },
+                )
             }
             entry<SettingsRoute> {
                 val settingsViewModel = viewModel(key = "settings") {
@@ -222,7 +248,7 @@ internal fun MainShell(
         if (activeTab == BarFriendTab.COCKTAILS) {
             decoratedTabs[BarFriendTab.COCKTAILS].orEmpty()
         } else {
-            decoratedTabs[BarFriendTab.COCKTAILS].orEmpty() + decoratedTabs[activeTab].orEmpty()
+            decoratedTabs[BarFriendTab.COCKTAILS].orEmpty().take(1) + decoratedTabs[activeTab].orEmpty()
         }
     }
 

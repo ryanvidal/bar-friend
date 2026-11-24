@@ -37,6 +37,8 @@ interface SessionRepository : NetworkSessionProvider {
     val sessionState: StateFlow<SessionState>
     suspend fun saveSession(serverUrl: String, token: String, barId: Int?, barName: String?)
     suspend fun clearSession()
+    suspend fun currentUserId(): Int? = null
+    suspend fun setActiveUserId(userId: Int) = Unit
 }
 
 @SingleIn(AppScope::class)
@@ -65,6 +67,9 @@ class DefaultSessionRepository(
 
     @Volatile
     private var cachedBarId: Int? = null
+
+    @Volatile
+    private var cachedUserId: Int? = null
 
     init {
         scope.launch {
@@ -98,6 +103,7 @@ class DefaultSessionRepository(
                 cachedToken = token
                 cachedServerUrl = serverUrl
                 cachedBarId = settings.activeBarId
+                cachedUserId = settings.activeUserId
                 _sessionState.value = SessionState.Authenticated(
                     serverUrl = serverUrl,
                     activeBarId = settings.activeBarId,
@@ -107,6 +113,7 @@ class DefaultSessionRepository(
                 cachedToken = null
                 cachedServerUrl = serverUrl
                 cachedBarId = null
+                cachedUserId = null
                 _sessionState.value = SessionState.Unauthenticated(lastServerUrl = serverUrl)
             }
             initialized = true
@@ -116,6 +123,7 @@ class DefaultSessionRepository(
             cachedToken = null
             cachedServerUrl = null
             cachedBarId = null
+            cachedUserId = null
             initialized = true
             _sessionState.value = SessionState.Unauthenticated(lastServerUrl = null)
         }
@@ -139,7 +147,9 @@ class DefaultSessionRepository(
                 withContext(NonCancellable) {
                     syncDao.clearAllData()
                     imageCacheCleaner.value.clear()
+                    appPreferences.setActiveUserId(null)
                 }
+                cachedUserId = null
             }
             tokenStore.saveToken(token)
             appPreferences.setServerConnection(normalized, barId, barName)
@@ -172,6 +182,7 @@ class DefaultSessionRepository(
             cachedToken = null
             cachedServerUrl = lastServer
             cachedBarId = null
+            cachedUserId = null
             initialized = true
             _sessionState.value = SessionState.Unauthenticated(lastServerUrl = lastServer)
         }
@@ -190,6 +201,23 @@ class DefaultSessionRepository(
     override suspend fun currentBarId(): Int? {
         ensureInitialized()
         return cachedBarId
+    }
+
+    override suspend fun currentUserId(): Int? {
+        ensureInitialized()
+        return cachedUserId
+    }
+
+    override suspend fun setActiveUserId(userId: Int) {
+        stateMutex.withLock {
+            if (!initialized) {
+                restoreSessionLocked()
+            }
+            if (_sessionState.value is SessionState.Authenticated) {
+                appPreferences.setActiveUserId(userId)
+                cachedUserId = userId
+            }
+        }
     }
 
     override suspend fun onUnauthorized(failedToken: String) {

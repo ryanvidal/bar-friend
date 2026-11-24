@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ryanvidal.barfriend.core.data.AppPreferences
 import com.ryanvidal.barfriend.core.data.CocktailRepository
+import com.ryanvidal.barfriend.core.data.InventoryRepository
 import com.ryanvidal.barfriend.core.model.CocktailDetail
 import com.ryanvidal.barfriend.core.model.VolumeUnit
 import kotlinx.coroutines.CancellationException
@@ -27,6 +28,10 @@ data class CocktailDetailUiState(
     val isDeleting: Boolean = false,
     val deleted: Boolean = false,
     val errorMessage: String? = null,
+    val shoppingListIngredientIds: Set<Int> = emptySet(),
+    val shoppingListInFlightIds: Set<Int> = emptySet(),
+    val isAddingMissingToShoppingList: Boolean = false,
+    val snackbarMessage: String? = null,
 )
 
 private data class DetailInteractionState(
@@ -41,11 +46,15 @@ private data class DetailInteractionState(
     val initialRefreshDone: Boolean = false,
     val refreshError: String? = null,
     val actionError: String? = null,
+    val shoppingListInFlightIds: Set<Int> = emptySet(),
+    val isAddingMissingToShoppingList: Boolean = false,
+    val snackbarMessage: String? = null,
 )
 
 class CocktailDetailViewModel(
     private val cocktailId: Int,
     private val cocktailRepository: CocktailRepository,
+    private val inventoryRepository: InventoryRepository,
     private val appPreferences: AppPreferences,
 ) : ViewModel() {
     private val interaction = MutableStateFlow(DetailInteractionState())
@@ -53,8 +62,9 @@ class CocktailDetailViewModel(
     val uiState: StateFlow<CocktailDetailUiState> = combine(
         cocktailRepository.observeCocktailDetail(cocktailId),
         appPreferences.settings,
+        inventoryRepository.observeShoppingListIds(),
         interaction,
-    ) { cocktail, settings, local ->
+    ) { cocktail, settings, shoppingListIds, local ->
         val effectiveError = local.actionError
             ?: if (cocktail == null) local.refreshError else null
         val boundedCheckedSteps = if (cocktail != null) {
@@ -75,6 +85,10 @@ class CocktailDetailViewModel(
             isDeleting = local.isDeleting,
             deleted = local.deleted,
             errorMessage = effectiveError,
+            shoppingListIngredientIds = shoppingListIds,
+            shoppingListInFlightIds = local.shoppingListInFlightIds,
+            isAddingMissingToShoppingList = local.isAddingMissingToShoppingList,
+            snackbarMessage = local.snackbarMessage,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -198,8 +212,137 @@ class CocktailDetailViewModel(
         }
     }
 
+    fun toggleIngredientInShoppingList(ingredientId: Int, ingredientName: String) {
+        while (true) {
+            val current = interaction.value
+            if (ingredientId in current.shoppingListInFlightIds) return
+            if (
+                interaction.compareAndSet(
+                    current,
+                    current.copy(
+                        shoppingListInFlightIds = current.shoppingListInFlightIds + ingredientId,
+                        actionError = null,
+                    ),
+                )
+            ) {
+                break
+            }
+        }
+        val isCurrentlyInList = ingredientId in uiState.value.shoppingListIngredientIds
+        viewModelScope.launch {
+            try {
+                val result = if (isCurrentlyInList) {
+                    inventoryRepository.removeFromShoppingList(listOf(ingredientId))
+                } else {
+                    inventoryRepository.addToShoppingList(listOf(ingredientId))
+                }
+                result
+                    .onSuccess {
+                        val message = if (isCurrentlyInList) {
+                            "Removed $ingredientName from shopping list"
+                        } else {
+                            "Added $ingredientName to shopping list"
+                        }
+                        interaction.update { it.copy(snackbarMessage = message) }
+                    }
+                    .onFailure { error ->
+                        val fallback = if (isCurrentlyInList) {
+                            "Unable to remove $ingredientName from shopping list."
+                        } else {
+                            "Unable to add $ingredientName to shopping list."
+                        }
+                        interaction.update {
+                            it.copy(actionError = error.message ?: fallback)
+                        }
+                    }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val fallback = if (isCurrentlyInList) {
+                    "Unable to remove $ingredientName from shopping list."
+                } else {
+                    "Unable to add $ingredientName to shopping list."
+                }
+                interaction.update {
+                    it.copy(actionError = e.message ?: fallback)
+                }
+            } finally {
+                interaction.update {
+                    it.copy(shoppingListInFlightIds = it.shoppingListInFlightIds - ingredientId)
+                }
+            }
+        }
+    }
+
+    fun addMissingIngredientsToShoppingList() {
+        if (interaction.value.isAddingMissingToShoppingList) return
+        val cocktail = uiState.value.cocktail ?: return
+        val missingRequiredIds = cocktail.ingredients
+            .asSequence()
+            .filter { !it.optional && !it.isAvailableInBar }
+            .map { it.ingredientId }
+            .distinct()
+            .toList()
+        if (missingRequiredIds.isEmpty()) return
+
+        val alreadyListed = uiState.value.shoppingListIngredientIds
+        val missingIds = missingRequiredIds.filterNot { it in alreadyListed }
+        if (missingIds.isEmpty()) {
+            interaction.update {
+                it.copy(snackbarMessage = "All missing ingredients are already on your shopping list")
+            }
+            return
+        }
+
+        while (true) {
+            val current = interaction.value
+            if (current.isAddingMissingToShoppingList) return
+            if (
+                interaction.compareAndSet(
+                    current,
+                    current.copy(isAddingMissingToShoppingList = true, actionError = null),
+                )
+            ) {
+                break
+            }
+        }
+        viewModelScope.launch {
+            try {
+                inventoryRepository.addToShoppingList(missingIds)
+                    .onSuccess {
+                        interaction.update {
+                            it.copy(
+                                snackbarMessage = "Added ${missingIds.size} ingredient(s) to shopping list",
+                            )
+                        }
+                    }
+                    .onFailure { error ->
+                        interaction.update {
+                            it.copy(
+                                actionError = error.message ?: "Unable to add missing ingredients to shopping list.",
+                            )
+                        }
+                    }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                interaction.update {
+                    it.copy(
+                        actionError = e.message ?: "Unable to add missing ingredients to shopping list.",
+                    )
+                }
+            } finally {
+                interaction.update { it.copy(isAddingMissingToShoppingList = false) }
+            }
+        }
+    }
+
     fun consumeDeletedEvent() {
         interaction.update { it.copy(deleted = false) }
+    }
+
+    fun consumeSnackbar() {
+        interaction.update { it.copy(snackbarMessage = null) }
     }
 
     fun clearError() {

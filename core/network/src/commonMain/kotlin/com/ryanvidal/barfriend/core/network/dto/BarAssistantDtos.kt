@@ -264,3 +264,57 @@ data class ScraperMetaDto(
     @SerialName("ingredient_name") val ingredientName: String,
     val source: String? = null,
 )
+
+@Serializable
+data class ProfileDto(
+    val id: Int,
+    val name: String,
+    val email: String,
+)
+
+@Serializable
+data class BarInventoryBatchRequestDto(
+    val ingredients: List<Int>,
+)
+
+@Serializable
+data class IngredientRecommendDto(
+    val id: Int,
+    val slug: String,
+    val name: String,
+    @SerialName("potential_cocktails") val potentialCocktails: Int = 0,
+)
+
+@Serializable
+data class CocktailBasicDto(
+    val id: Int,
+    val slug: String,
+    val name: String,
+)
+
+@Serializable
+data class ShoppingListItemDto(
+    val ingredient: IngredientBasicDto,
+    val quantity: Int? = 1,
+)
+
+@Serializable
+data class ShoppingListIngredientInputDto(
+    val id: Int,
+    val quantity: Int = 1,
+)
+
+@Serializable
+data class ShoppingListBatchStoreRequestDto(
+    val ingredients: List<ShoppingListIngredientInputDto>,
+)
+
+@Serializable
+data class ShoppingListIngredientIdDto(
+    val id: Int,
+)
+
+@Serializable
+data class ShoppingListBatchDeleteRequestDto(
+    val ingredients: List<ShoppingListIngredientIdDto>,
+)

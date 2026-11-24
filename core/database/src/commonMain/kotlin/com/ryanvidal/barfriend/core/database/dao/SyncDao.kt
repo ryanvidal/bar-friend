@@ -10,6 +10,7 @@ import com.ryanvidal.barfriend.core.database.entity.CocktailIngredientEntity
 import com.ryanvidal.barfriend.core.database.entity.CocktailMethodEntity
 import com.ryanvidal.barfriend.core.database.entity.GlassEntity
 import com.ryanvidal.barfriend.core.database.entity.IngredientEntity
+import com.ryanvidal.barfriend.core.database.entity.ShoppingListEntity
 import com.ryanvidal.barfriend.core.database.entity.SyncMetadataEntity
 import com.ryanvidal.barfriend.core.database.entity.TagEntity
 import com.ryanvidal.barfriend.core.database.entity.UtensilEntity
@@ -37,6 +38,9 @@ interface SyncDao {
     @Query("DELETE FROM bar_shelf WHERE barId = :barId")
     suspend fun deleteBarShelfForBar(barId: Int)
 
+    @Query("DELETE FROM shopping_list WHERE barId = :barId")
+    suspend fun deleteShoppingListForBar(barId: Int)
+
     @Upsert
     suspend fun upsertCocktails(cocktails: List<CocktailEntity>)
 
@@ -60,6 +64,9 @@ interface SyncDao {
 
     @Upsert
     suspend fun upsertBarShelfItems(items: List<BarShelfEntity>)
+
+    @Upsert
+    suspend fun upsertShoppingListItems(items: List<ShoppingListEntity>)
 
     @Upsert
     suspend fun upsertSyncMetadata(metadata: SyncMetadataEntity)
@@ -107,6 +114,7 @@ interface SyncDao {
         shelfIngredientIds: List<Int>,
         syncKey: String,
         syncedAtEpochMillis: Long,
+        shoppingListItems: List<ShoppingListEntity>? = null,
     ) {
         deleteCocktailsForBar(barId)
         deleteIngredientsForBar(barId)
@@ -140,6 +148,13 @@ interface SyncDao {
         val distinctShelf = shelfIngredientIds.distinct()
         if (distinctShelf.isNotEmpty()) {
             upsertBarShelfItems(distinctShelf.map { BarShelfEntity(barId = barId, ingredientId = it) })
+        }
+        if (shoppingListItems != null) {
+            deleteShoppingListForBar(barId)
+            val distinctShopping = shoppingListItems.distinctBy { it.ingredientId }
+            if (distinctShopping.isNotEmpty()) {
+                upsertShoppingListItems(distinctShopping)
+            }
         }
         upsertSyncMetadata(
             SyncMetadataEntity(

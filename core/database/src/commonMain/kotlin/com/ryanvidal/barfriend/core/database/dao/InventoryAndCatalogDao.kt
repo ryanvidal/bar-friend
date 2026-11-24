@@ -19,8 +19,14 @@ interface InventoryDao {
     @Query("SELECT ingredientId FROM bar_shelf WHERE barId = :barId")
     fun observeBarShelfIngredientIds(barId: Int): Flow<List<Int>>
 
+    @Query("SELECT ingredientId FROM bar_shelf WHERE barId = :barId")
+    suspend fun getBarShelfIngredientIds(barId: Int): List<Int>
+
     @Query("SELECT * FROM shopping_list WHERE barId = :barId")
     fun observeShoppingList(barId: Int): Flow<List<ShoppingListEntity>>
+
+    @Query("SELECT * FROM shopping_list WHERE barId = :barId")
+    suspend fun getShoppingListSnapshot(barId: Int): List<ShoppingListEntity>
 
     @Upsert
     suspend fun upsertBarShelfItems(items: List<BarShelfEntity>)
@@ -61,6 +67,9 @@ interface InventoryDao {
 interface CatalogDao {
     @Query("SELECT * FROM ingredients WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
     fun observeIngredients(barId: Int): Flow<List<IngredientEntity>>
+
+    @Query("SELECT * FROM ingredients WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
+    suspend fun getIngredientsForBar(barId: Int): List<IngredientEntity>
 
     @Query("SELECT * FROM glasses WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
     fun observeGlasses(barId: Int): Flow<List<GlassEntity>>

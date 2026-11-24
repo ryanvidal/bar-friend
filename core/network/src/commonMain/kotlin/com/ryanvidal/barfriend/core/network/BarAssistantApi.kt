@@ -2,6 +2,8 @@ package com.ryanvidal.barfriend.core.network
 
 import com.ryanvidal.barfriend.core.network.dto.ApiErrorDto
 import com.ryanvidal.barfriend.core.network.dto.BarDto
+import com.ryanvidal.barfriend.core.network.dto.BarInventoryBatchRequestDto
+import com.ryanvidal.barfriend.core.network.dto.CocktailBasicDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailMethodDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailWriteRequestDto
@@ -10,11 +12,18 @@ import com.ryanvidal.barfriend.core.network.dto.GlassDto
 import com.ryanvidal.barfriend.core.network.dto.ImageDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientBasicDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientDto
+import com.ryanvidal.barfriend.core.network.dto.IngredientRecommendDto
 import com.ryanvidal.barfriend.core.network.dto.LoginRequestDto
 import com.ryanvidal.barfriend.core.network.dto.PaginatedEnvelope
+import com.ryanvidal.barfriend.core.network.dto.ProfileDto
 import com.ryanvidal.barfriend.core.network.dto.ScrapeRequestDto
 import com.ryanvidal.barfriend.core.network.dto.ScrapeResponseDto
 import com.ryanvidal.barfriend.core.network.dto.ServerVersionDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListBatchDeleteRequestDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListBatchStoreRequestDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListIngredientIdDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListIngredientInputDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListItemDto
 import com.ryanvidal.barfriend.core.network.dto.TagDto
 import com.ryanvidal.barfriend.core.network.dto.ToggleFavoriteDto
 import com.ryanvidal.barfriend.core.network.dto.TokenDto
@@ -95,6 +104,14 @@ interface BarAssistantApi {
         page: Int = 1,
         perPage: Int = 200,
     ): PaginatedEnvelope<IngredientBasicDto>
+    suspend fun getProfile(): ProfileDto
+    suspend fun addBarInventoryIngredients(barId: Int, ingredientIds: List<Int>)
+    suspend fun removeBarInventoryIngredients(barId: Int, ingredientIds: List<Int>)
+    suspend fun getRecommendedBarIngredients(barId: Int): List<IngredientRecommendDto>
+    suspend fun getExtraCocktailsForIngredient(barId: Int, ingredientId: Int): List<CocktailBasicDto>
+    suspend fun getShoppingList(userId: Int): List<ShoppingListItemDto>
+    suspend fun addToShoppingList(userId: Int, items: List<ShoppingListIngredientInputDto>)
+    suspend fun removeFromShoppingList(userId: Int, ingredientIds: List<Int>)
 }
 
 @SingleIn(AppScope::class)
@@ -372,6 +389,91 @@ class KtorBarAssistantApi(
             parameter("per_page", perPage)
         }
         return response.decodeSuccess()
+    }
+
+    override suspend fun getProfile(): ProfileDto {
+        val base = requireApiBaseUrl()
+        val response = httpClient.get("$base/profile")
+        return response.decodeSuccess<DataEnvelope<ProfileDto>>().data
+    }
+
+    override suspend fun addBarInventoryIngredients(barId: Int, ingredientIds: List<Int>) {
+        val base = requireApiBaseUrl()
+        postJson(
+            url = "$base/bars/$barId/inventory/ingredients/batch-store",
+            bodyJson = BarAssistantJson.encodeToString(
+                BarInventoryBatchRequestDto.serializer(),
+                BarInventoryBatchRequestDto(ingredientIds),
+            ),
+        )
+    }
+
+    override suspend fun removeBarInventoryIngredients(barId: Int, ingredientIds: List<Int>) {
+        val base = requireApiBaseUrl()
+        postJson(
+            url = "$base/bars/$barId/inventory/ingredients/batch-delete",
+            bodyJson = BarAssistantJson.encodeToString(
+                BarInventoryBatchRequestDto.serializer(),
+                BarInventoryBatchRequestDto(ingredientIds),
+            ),
+        )
+    }
+
+    override suspend fun getRecommendedBarIngredients(barId: Int): List<IngredientRecommendDto> {
+        val base = requireApiBaseUrl()
+        val response = httpClient.get("$base/bars/$barId/inventory/ingredients/recommend")
+        return response.decodeSuccess<DataEnvelope<List<IngredientRecommendDto>>>().data
+    }
+
+    override suspend fun getExtraCocktailsForIngredient(
+        barId: Int,
+        ingredientId: Int,
+    ): List<CocktailBasicDto> {
+        val base = requireApiBaseUrl()
+        val response = httpClient.get("$base/bars/$barId/inventory/ingredients/$ingredientId/extra")
+        return response.decodeSuccess<DataEnvelope<List<CocktailBasicDto>>>().data
+    }
+
+    override suspend fun getShoppingList(userId: Int): List<ShoppingListItemDto> {
+        val base = requireApiBaseUrl()
+        val response = httpClient.get("$base/members/$userId/shopping-list")
+        return response.decodeSuccess<DataEnvelope<List<ShoppingListItemDto>>>().data
+    }
+
+    override suspend fun addToShoppingList(
+        userId: Int,
+        items: List<ShoppingListIngredientInputDto>,
+    ) {
+        val base = requireApiBaseUrl()
+        postJson(
+            url = "$base/members/$userId/shopping-list/batch-store",
+            bodyJson = BarAssistantJson.encodeToString(
+                ShoppingListBatchStoreRequestDto.serializer(),
+                ShoppingListBatchStoreRequestDto(items),
+            ),
+        )
+    }
+
+    override suspend fun removeFromShoppingList(userId: Int, ingredientIds: List<Int>) {
+        val base = requireApiBaseUrl()
+        postJson(
+            url = "$base/members/$userId/shopping-list/batch-delete",
+            bodyJson = BarAssistantJson.encodeToString(
+                ShoppingListBatchDeleteRequestDto.serializer(),
+                ShoppingListBatchDeleteRequestDto(
+                    ingredientIds.map { ShoppingListIngredientIdDto(it) },
+                ),
+            ),
+        )
+    }
+
+    private suspend fun postJson(url: String, bodyJson: String) {
+        val response = httpClient.post(url) {
+            setBody(TextContent(bodyJson, ContentType.Application.Json))
+        }
+        if (!response.status.isSuccess()) {
+            throw response.toApiException()
+        }
     }
 
     private fun parseCocktailSlugOrIdFromLocation(base: String, location: String): String? {

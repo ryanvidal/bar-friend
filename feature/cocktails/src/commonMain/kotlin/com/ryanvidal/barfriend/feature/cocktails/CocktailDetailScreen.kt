@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
@@ -22,6 +23,7 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.AddShoppingCart
 import androidx.compose.material.icons.rounded.Cancel
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -30,6 +32,7 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.LocalBar
+import androidx.compose.material.icons.rounded.ShoppingCart
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.AlertDialog
@@ -126,6 +129,14 @@ fun CocktailDetailScreen(
         }
     }
 
+    LaunchedEffect(uiState.snackbarMessage) {
+        val message = uiState.snackbarMessage
+        if (message != null) {
+            snackbarHostState.showSnackbar(message)
+            viewModel.consumeSnackbar()
+        }
+    }
+
     CocktailDetailContent(
         uiState = uiState,
         onBack = onBack,
@@ -138,6 +149,8 @@ fun CocktailDetailScreen(
         onSelectUnit = viewModel::setUnit,
         onToggleStepChecked = viewModel::toggleStepChecked,
         snackbarHostState = snackbarHostState,
+        onToggleShoppingList = viewModel::toggleIngredientInShoppingList,
+        onAddMissingToShoppingList = viewModel::addMissingIngredientsToShoppingList,
         modifier = modifier,
     )
 }
@@ -157,6 +170,8 @@ fun CocktailDetailContent(
     onToggleStepChecked: (Int) -> Unit,
     modifier: Modifier = Modifier,
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+    onToggleShoppingList: (Int, String) -> Unit = { _, _ -> },
+    onAddMissingToShoppingList: () -> Unit = {},
 ) {
     var showDeleteConfirmation by rememberSaveable { mutableStateOf(false) }
     val cocktail = uiState.cocktail
@@ -263,6 +278,14 @@ fun CocktailDetailContent(
                 val sortedIngredients = remember(cocktail.ingredients) {
                     cocktail.ingredients.sortedBy { it.sort }
                 }
+                val unlistedMissingCount = remember(sortedIngredients, uiState.shoppingListIngredientIds) {
+                    sortedIngredients
+                        .asSequence()
+                        .filter { !it.optional && !it.isAvailableInBar }
+                        .map { it.ingredientId }
+                        .distinct()
+                        .count { it !in uiState.shoppingListIngredientIds }
+                }
                 val steps = remember(cocktail.instructions) {
                     parseInstructionSteps(cocktail.instructions)
                 }
@@ -344,6 +367,29 @@ fun CocktailDetailContent(
                     item(key = "ingredients_header") {
                         SectionHeader(
                             title = "Ingredients (${sortedIngredients.size})",
+                            trailing = if (!uiState.isMakeMode && unlistedMissingCount > 0) {
+                                {
+                                    TextButton(
+                                        onClick = onAddMissingToShoppingList,
+                                        enabled = !uiState.isAddingMissingToShoppingList,
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                    ) {
+                                        if (uiState.isAddingMissingToShoppingList) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(14.dp),
+                                                strokeWidth = 2.dp,
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                        }
+                                        Text(
+                                            text = "Add missing ($unlistedMissingCount)",
+                                            maxLines = 1,
+                                        )
+                                    }
+                                }
+                            } else {
+                                null
+                            },
                         )
                     }
 
@@ -365,6 +411,11 @@ fun CocktailDetailContent(
                                 selectedUnit = uiState.selectedUnit,
                                 scaleFactor = uiState.scaleFactor,
                                 isMakeMode = uiState.isMakeMode,
+                                inShoppingList = ingredient.ingredientId in uiState.shoppingListIngredientIds,
+                                isShoppingListBusy = ingredient.ingredientId in uiState.shoppingListInFlightIds,
+                                onToggleShoppingList = {
+                                    onToggleShoppingList(ingredient.ingredientId, ingredient.name)
+                                },
                             )
                         }
                     }
@@ -834,6 +885,9 @@ private fun DetailIngredientRow(
     selectedUnit: VolumeUnit,
     scaleFactor: Double,
     isMakeMode: Boolean,
+    inShoppingList: Boolean = false,
+    isShoppingListBusy: Boolean = false,
+    onToggleShoppingList: () -> Unit = {},
 ) {
     val statusColors = LocalBarFriendStatusColors.current
     val formattedAmount = UnitFormatter.formatIngredientAmount(
@@ -864,6 +918,7 @@ private fun DetailIngredientRow(
         ingredient.inBarShelfAsComplex -> "Homemade ingredient"
         else -> "Missing"
     }
+    val showShoppingListAction = !isMakeMode && !ingredient.isAvailableInBar
 
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -874,7 +929,12 @@ private fun DetailIngredientRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .padding(
+                    start = 14.dp,
+                    top = 12.dp,
+                    bottom = 12.dp,
+                    end = if (showShoppingListAction) 4.dp else 14.dp,
+                ),
             verticalAlignment = Alignment.Top,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -949,6 +1009,40 @@ private fun DetailIngredientRow(
                     },
                     color = MaterialTheme.colorScheme.primary,
                 )
+            }
+            if (showShoppingListAction) {
+                IconButton(
+                    onClick = onToggleShoppingList,
+                    enabled = !isShoppingListBusy,
+                    modifier = Modifier
+                        .align(Alignment.CenterVertically)
+                        .size(48.dp),
+                ) {
+                    if (isShoppingListBusy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (inShoppingList) {
+                                Icons.Rounded.ShoppingCart
+                            } else {
+                                Icons.Rounded.AddShoppingCart
+                            },
+                            contentDescription = if (inShoppingList) {
+                                "Remove from shopping list"
+                            } else {
+                                "Add to shopping list"
+                            },
+                            tint = if (inShoppingList) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                }
             }
         }
     }
@@ -1141,6 +1235,17 @@ private fun CocktailDetailStandardLightPreview() {
 
 @Preview
 @Composable
+private fun CocktailDetailShoppingListedDarkPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.DARK) {
+        CocktailDetailPreviewHost(
+            isMakeMode = false,
+            shoppingListIngredientIds = setOf(3),
+        )
+    }
+}
+
+@Preview
+@Composable
 private fun CocktailDetailMakeModeDarkPreview() {
     BarFriendTheme(themeMode = AppThemeMode.DARK) {
         CocktailDetailPreviewHost(isMakeMode = true)
@@ -1156,7 +1261,10 @@ private fun CocktailDetailMakeModeLightPreview() {
 }
 
 @Composable
-private fun CocktailDetailPreviewHost(isMakeMode: Boolean) {
+private fun CocktailDetailPreviewHost(
+    isMakeMode: Boolean,
+    shoppingListIngredientIds: Set<Int> = emptySet(),
+) {
     CocktailDetailContent(
         uiState = CocktailDetailUiState(
             cocktail = previewCocktailDetail(),
@@ -1165,6 +1273,7 @@ private fun CocktailDetailPreviewHost(isMakeMode: Boolean) {
             scaleFactor = 1.0,
             isMakeMode = isMakeMode,
             checkedSteps = if (isMakeMode) setOf(0) else emptySet(),
+            shoppingListIngredientIds = shoppingListIngredientIds,
         ),
         onBack = {},
         onEditCocktail = {},
@@ -1175,5 +1284,7 @@ private fun CocktailDetailPreviewHost(isMakeMode: Boolean) {
         onSelectScale = {},
         onSelectUnit = {},
         onToggleStepChecked = {},
+        onToggleShoppingList = { _, _ -> },
+        onAddMissingToShoppingList = {},
     )
 }

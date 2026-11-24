@@ -21,6 +21,7 @@ import com.ryanvidal.barfriend.core.network.dto.GlassDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientBasicDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientDto
 import com.ryanvidal.barfriend.core.network.dto.PaginatedEnvelope
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListItemDto
 import com.ryanvidal.barfriend.core.network.dto.TagDto
 import com.ryanvidal.barfriend.core.network.dto.UtensilDto
 import dev.zacsweers.metro.AppScope
@@ -236,6 +237,9 @@ class DefaultCocktailRepository(
                 val utensilEntities = payload.utensils.distinctBy { it.id }
                     .map { it.toEntity(barId) }
                 val shelfIds = payload.shelfIngredients.map { it.id }.distinct()
+                val shoppingListEntities = payload.shoppingListItems
+                    ?.distinctBy { it.ingredient.id }
+                    ?.map { it.toEntity(barId) }
 
                 val wroteSnapshot = mutationMutex.withLock {
                     if (!isSessionStillActive(serverUrl, barId) || mutationGeneration != startGen) {
@@ -254,6 +258,7 @@ class DefaultCocktailRepository(
                             shelfIngredientIds = shelfIds,
                             syncKey = syncKey(barId),
                             syncedAtEpochMillis = now,
+                            shoppingListItems = shoppingListEntities,
                         )
                         lastSyncedSession = sessionKey
                         _syncStatus.value = SyncStatus(
@@ -480,6 +485,14 @@ class DefaultCocktailRepository(
         val shelfDeferred = async {
             fetchAllPages { page -> api.getBarInventoryIngredientIds(barId = barId, page = page, perPage = 200) }
         }
+        val shoppingListDeferred = async {
+            runCatching {
+                val userId = sessionRepository.currentUserId()
+                    ?: api.getProfile().id.also { sessionRepository.setActiveUserId(it) }
+                api.getShoppingList(userId)
+            }.onFailure { if (it is CancellationException) throw it }
+                .getOrNull()
+        }
 
         SyncPayload(
             cocktails = cocktailsDeferred.await(),
@@ -489,6 +502,7 @@ class DefaultCocktailRepository(
             tags = tagsDeferred.await(),
             utensils = utensilsDeferred.await(),
             shelfIngredients = shelfDeferred.await(),
+            shoppingListItems = shoppingListDeferred.await(),
         )
     }
 
@@ -531,6 +545,7 @@ class DefaultCocktailRepository(
         val tags: List<TagDto>,
         val utensils: List<UtensilDto>,
         val shelfIngredients: List<IngredientBasicDto>,
+        val shoppingListItems: List<ShoppingListItemDto>?,
     )
 
     private companion object {

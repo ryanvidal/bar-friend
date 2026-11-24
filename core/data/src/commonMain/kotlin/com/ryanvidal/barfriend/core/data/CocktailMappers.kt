@@ -6,6 +6,7 @@ import com.ryanvidal.barfriend.core.database.entity.CocktailIngredientEntity
 import com.ryanvidal.barfriend.core.database.entity.CocktailMethodEntity
 import com.ryanvidal.barfriend.core.database.entity.GlassEntity
 import com.ryanvidal.barfriend.core.database.entity.IngredientEntity
+import com.ryanvidal.barfriend.core.database.entity.ShoppingListEntity
 import com.ryanvidal.barfriend.core.database.entity.TagEntity
 import com.ryanvidal.barfriend.core.database.entity.UtensilEntity
 import com.ryanvidal.barfriend.core.model.CocktailDetail
@@ -20,12 +21,16 @@ import com.ryanvidal.barfriend.core.model.CocktailUpsertRequest
 import com.ryanvidal.barfriend.core.model.Glass
 import com.ryanvidal.barfriend.core.model.IngredientSummary
 import com.ryanvidal.barfriend.core.model.IngredientSubstitute
+import com.ryanvidal.barfriend.core.model.RecommendedIngredient
 import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.ScrapedCocktailIngredient
 import com.ryanvidal.barfriend.core.model.ScrapedImage
+import com.ryanvidal.barfriend.core.model.ShoppingListItem
+import com.ryanvidal.barfriend.core.model.UnlockedCocktail
 import com.ryanvidal.barfriend.core.model.UploadedImage
 import com.ryanvidal.barfriend.core.model.Utensil
 import com.ryanvidal.barfriend.core.network.ServerUrlNormalizer
+import com.ryanvidal.barfriend.core.network.dto.CocktailBasicDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailIngredientSubstituteWriteDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailIngredientWriteDto
@@ -34,7 +39,9 @@ import com.ryanvidal.barfriend.core.network.dto.CocktailWriteRequestDto
 import com.ryanvidal.barfriend.core.network.dto.GlassDto
 import com.ryanvidal.barfriend.core.network.dto.ImageDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientDto
+import com.ryanvidal.barfriend.core.network.dto.IngredientRecommendDto
 import com.ryanvidal.barfriend.core.network.dto.ScrapeResponseDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListItemDto
 import com.ryanvidal.barfriend.core.network.dto.TagDto
 import com.ryanvidal.barfriend.core.network.dto.UtensilDto
 import io.ktor.http.URLBuilder
@@ -505,6 +512,85 @@ fun TagEntity.toModel(): CocktailTag = CocktailTag(
 
 fun UtensilEntity.toModel(): Utensil = Utensil(
     id = id,
+    name = name,
+)
+
+fun recalculateCocktailAvailability(
+    items: List<CocktailWithIngredients>,
+    shelfIngredientIds: Set<Int>,
+): Pair<List<CocktailEntity>, List<CocktailIngredientEntity>> {
+    val updatedCocktails = ArrayList<CocktailEntity>(items.size)
+    val updatedIngredients = mutableListOf<CocktailIngredientEntity>()
+
+    for (item in items) {
+        val sortedIngredients = item.ingredients.sortedBy { it.sort }
+        val cocktailUpdatedIngredients = ArrayList<CocktailIngredientEntity>(sortedIngredients.size)
+
+        for (ing in sortedIngredients) {
+            val newInBarShelf = ing.ingredientId in shelfIngredientIds
+            val updatedSubs = decodeStoredList<StoredIngredientSubstitute>(ing.substitutesJson).map { sub ->
+                sub.copy(inBarShelf = sub.id in shelfIngredientIds)
+            }
+            val newInBarShelfAsSubstitute = updatedSubs.any { it.inBarShelf }
+            val updatedIng = ing.copy(
+                inBarShelf = newInBarShelf,
+                inBarShelfAsSubstitute = newInBarShelfAsSubstitute,
+                substitutesJson = StorageJson.encodeToString(updatedSubs),
+            )
+            cocktailUpdatedIngredients += updatedIng
+            updatedIngredients += updatedIng
+        }
+
+        val missingNames = cocktailUpdatedIngredients
+            .filter { ing ->
+                !ing.optional &&
+                    !(ing.inBarShelf || ing.inBarShelfAsSubstitute || ing.inBarShelfAsVariant || ing.inBarShelfAsComplex)
+            }
+            .map { it.ingredientName }
+            .distinct()
+
+        val newCocktailInBarShelf = cocktailUpdatedIngredients.isNotEmpty() && missingNames.isEmpty()
+        updatedCocktails += item.cocktail.copy(
+            inBarShelf = newCocktailInBarShelf,
+            missingIngredientsCount = missingNames.size,
+            missingIngredientNamesJson = StorageJson.encodeToString(missingNames),
+        )
+    }
+
+    return updatedCocktails to updatedIngredients
+}
+
+fun ShoppingListEntity.toModel(ingredient: IngredientEntity?): ShoppingListItem = ShoppingListItem(
+    ingredientId = ingredientId,
+    ingredientSlug = ingredient?.slug ?: ingredientId.toString(),
+    ingredientName = ingredient?.name ?: "Ingredient #$ingredientId",
+    categoryName = ingredient?.categoryName,
+    quantity = quantity.coerceAtLeast(1),
+    mainImageThumbUrl = ingredient?.mainImageThumbUrl,
+)
+
+fun ShoppingListItemDto.toEntity(barId: Int): ShoppingListEntity = ShoppingListEntity(
+    barId = barId,
+    ingredientId = ingredient.id,
+    quantity = (quantity ?: 1).coerceAtLeast(1),
+)
+
+fun IngredientRecommendDto.toModel(
+    ingredient: IngredientEntity?,
+    inShoppingList: Boolean,
+): RecommendedIngredient = RecommendedIngredient(
+    id = id,
+    slug = slug,
+    name = name,
+    potentialCocktails = potentialCocktails,
+    categoryName = ingredient?.categoryName,
+    mainImageThumbUrl = ingredient?.mainImageThumbUrl,
+    inShoppingList = inShoppingList,
+)
+
+fun CocktailBasicDto.toUnlockedCocktail(): UnlockedCocktail = UnlockedCocktail(
+    id = id,
+    slug = slug,
     name = name,
 )
 

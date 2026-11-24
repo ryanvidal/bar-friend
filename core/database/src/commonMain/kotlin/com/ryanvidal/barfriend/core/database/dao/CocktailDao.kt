@@ -28,6 +28,10 @@ interface CocktailDao {
     @Query("SELECT * FROM cocktails WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
     fun observeCocktailsWithIngredients(barId: Int): Flow<List<CocktailWithIngredients>>
 
+    @Transaction
+    @Query("SELECT * FROM cocktails WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
+    suspend fun getCocktailsWithIngredientsForBar(barId: Int): List<CocktailWithIngredients>
+
     @Query(
         """
         SELECT * FROM cocktails
@@ -86,6 +90,19 @@ interface CocktailDao {
         ingredients: List<CocktailIngredientEntity>,
     ) {
         deleteCocktailsForBar(barId)
+        if (cocktails.isNotEmpty()) {
+            upsertCocktails(cocktails)
+        }
+        if (ingredients.isNotEmpty()) {
+            upsertCocktailIngredients(ingredients)
+        }
+    }
+
+    @Transaction
+    suspend fun updateCocktailsAndIngredients(
+        cocktails: List<CocktailEntity>,
+        ingredients: List<CocktailIngredientEntity>,
+    ) {
         if (cocktails.isNotEmpty()) {
             upsertCocktails(cocktails)
         }

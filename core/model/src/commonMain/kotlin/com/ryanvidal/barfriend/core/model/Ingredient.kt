@@ -33,3 +33,19 @@ data class ShoppingListItem(
     val quantity: Int,
     val mainImageThumbUrl: String?,
 )
+
+data class RecommendedIngredient(
+    val id: Int,
+    val slug: String,
+    val name: String,
+    val potentialCocktails: Int,
+    val categoryName: String? = null,
+    val mainImageThumbUrl: String? = null,
+    val inShoppingList: Boolean = false,
+)
+
+data class UnlockedCocktail(
+    val id: Int,
+    val slug: String,
+    val name: String,
+)
