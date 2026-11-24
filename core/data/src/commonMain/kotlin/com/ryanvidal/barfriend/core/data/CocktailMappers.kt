@@ -1,11 +1,14 @@
 package com.ryanvidal.barfriend.core.data
 
+import com.ryanvidal.barfriend.core.database.dao.CocktailAvailabilityUpdate
+import com.ryanvidal.barfriend.core.database.dao.CocktailIngredientAvailabilityUpdate
 import com.ryanvidal.barfriend.core.database.dao.CocktailWithIngredients
 import com.ryanvidal.barfriend.core.database.entity.CocktailEntity
 import com.ryanvidal.barfriend.core.database.entity.CocktailIngredientEntity
 import com.ryanvidal.barfriend.core.database.entity.CocktailMethodEntity
 import com.ryanvidal.barfriend.core.database.entity.GlassEntity
 import com.ryanvidal.barfriend.core.database.entity.IngredientEntity
+import com.ryanvidal.barfriend.core.database.entity.ShoppingListEntity
 import com.ryanvidal.barfriend.core.database.entity.TagEntity
 import com.ryanvidal.barfriend.core.database.entity.UtensilEntity
 import com.ryanvidal.barfriend.core.model.CocktailDetail
@@ -20,12 +23,16 @@ import com.ryanvidal.barfriend.core.model.CocktailUpsertRequest
 import com.ryanvidal.barfriend.core.model.Glass
 import com.ryanvidal.barfriend.core.model.IngredientSummary
 import com.ryanvidal.barfriend.core.model.IngredientSubstitute
+import com.ryanvidal.barfriend.core.model.RecommendedIngredient
 import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.ScrapedCocktailIngredient
 import com.ryanvidal.barfriend.core.model.ScrapedImage
+import com.ryanvidal.barfriend.core.model.ShoppingListItem
+import com.ryanvidal.barfriend.core.model.UnlockedCocktail
 import com.ryanvidal.barfriend.core.model.UploadedImage
 import com.ryanvidal.barfriend.core.model.Utensil
 import com.ryanvidal.barfriend.core.network.ServerUrlNormalizer
+import com.ryanvidal.barfriend.core.network.dto.CocktailBasicDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailIngredientSubstituteWriteDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailIngredientWriteDto
@@ -34,7 +41,9 @@ import com.ryanvidal.barfriend.core.network.dto.CocktailWriteRequestDto
 import com.ryanvidal.barfriend.core.network.dto.GlassDto
 import com.ryanvidal.barfriend.core.network.dto.ImageDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientDto
+import com.ryanvidal.barfriend.core.network.dto.IngredientRecommendDto
 import com.ryanvidal.barfriend.core.network.dto.ScrapeResponseDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListItemDto
 import com.ryanvidal.barfriend.core.network.dto.TagDto
 import com.ryanvidal.barfriend.core.network.dto.UtensilDto
 import io.ktor.http.URLBuilder
@@ -194,7 +203,7 @@ fun CocktailDto.toEntityAndIngredients(
         )
     }
 
-    val resolvedInBarShelf = inBarShelf || (ingredientEntities.isNotEmpty() && missingNames.isEmpty())
+    val resolvedInBarShelf = inBarShelf || (ingredientEntities.any { !it.optional } && missingNames.isEmpty())
 
     val cocktailEntity = CocktailEntity(
         id = id,
@@ -430,6 +439,9 @@ fun IngredientDto.toEntity(barId: Int, serverUrl: String? = null): IngredientEnt
     val primaryImage = images.minByOrNull { it.sort }
     val thumbUrl = resolveImageUrl(primaryImage?.thumbUrl, serverUrl)
         ?: resolveImageUrl(primaryImage?.url, serverUrl)
+    val resolvedCategoryName = category?.name?.takeIf { it.isNotBlank() }
+        ?: hierarchy?.ancestors?.firstOrNull()?.name?.takeIf { it.isNotBlank() }
+    val resolvedParentId = hierarchy?.parentIngredient?.id ?: parentIngredient?.id
     return IngredientEntity(
         id = id,
         barId = barId,
@@ -438,8 +450,8 @@ fun IngredientDto.toEntity(barId: Int, serverUrl: String? = null): IngredientEnt
         strength = strength,
         description = description,
         color = color,
-        categoryName = category?.name,
-        parentIngredientId = parentIngredient?.id,
+        categoryName = resolvedCategoryName,
+        parentIngredientId = resolvedParentId,
         mainImageThumbUrl = thumbUrl,
     )
 }
@@ -505,6 +517,214 @@ fun TagEntity.toModel(): CocktailTag = CocktailTag(
 
 fun UtensilEntity.toModel(): Utensil = Utensil(
     id = id,
+    name = name,
+)
+
+data class CocktailAvailabilityRecalculation(
+    val cocktailUpdates: List<CocktailAvailabilityUpdate>,
+    val ingredientUpdates: List<CocktailIngredientAvailabilityUpdate>,
+)
+
+private class IngredientHierarchyIndex(
+    catalogIngredients: List<IngredientEntity>,
+) {
+    private val childrenByParent: Map<Int, List<Int>>
+    private val parentById: Map<Int, Int?>
+    private val hasDescendantMemo = HashMap<Int, Boolean>()
+
+    init {
+        val children = HashMap<Int, MutableList<Int>>()
+        val parents = HashMap<Int, Int?>(catalogIngredients.size)
+        for (ingredient in catalogIngredients) {
+            val parentId = ingredient.parentIngredientId
+            parents[ingredient.id] = parentId
+            if (parentId != null && parentId != ingredient.id) {
+                children.getOrPut(parentId) { mutableListOf() }.add(ingredient.id)
+            }
+        }
+        childrenByParent = children
+        parentById = parents
+    }
+
+    fun hasDescendantInShelf(ingredientId: Int, shelfIngredientIds: Set<Int>): Boolean {
+        hasDescendantMemo[ingredientId]?.let { return it }
+        val visited = HashSet<Int>()
+        val stack = ArrayDeque<Int>()
+        visited.add(ingredientId)
+        childrenByParent[ingredientId].orEmpty().forEach { child ->
+            if (visited.add(child)) stack.addLast(child)
+        }
+        var found = false
+        while (stack.isNotEmpty()) {
+            val current = stack.removeLast()
+            if (current in shelfIngredientIds) {
+                found = true
+                break
+            }
+            childrenByParent[current].orEmpty().forEach { child ->
+                if (visited.add(child)) stack.addLast(child)
+            }
+        }
+        hasDescendantMemo[ingredientId] = found
+        return found
+    }
+
+    fun intersectsFamily(ingredientId: Int, targetIds: Set<Int>): Boolean {
+        if (ingredientId in targetIds) return true
+        val visited = HashSet<Int>()
+        visited.add(ingredientId)
+        var ancestor = parentById[ingredientId]
+        while (ancestor != null && visited.add(ancestor)) {
+            if (ancestor in targetIds) return true
+            ancestor = parentById[ancestor]
+        }
+        val stack = ArrayDeque<Int>()
+        childrenByParent[ingredientId].orEmpty().forEach { child ->
+            if (visited.add(child)) stack.addLast(child)
+        }
+        while (stack.isNotEmpty()) {
+            val current = stack.removeLast()
+            if (current in targetIds) return true
+            childrenByParent[current].orEmpty().forEach { child ->
+                if (visited.add(child)) stack.addLast(child)
+            }
+        }
+        return false
+    }
+}
+
+fun recalculateCocktailAvailability(
+    items: List<CocktailWithIngredients>,
+    shelfIngredientIds: Set<Int>,
+    catalogIngredients: List<IngredientEntity> = emptyList(),
+    toggledIngredientIds: Set<Int>? = null,
+): CocktailAvailabilityRecalculation {
+    val hierarchy = IngredientHierarchyIndex(catalogIngredients)
+    val hasCatalogHierarchy = catalogIngredients.isNotEmpty()
+    val cocktailUpdates = mutableListOf<CocktailAvailabilityUpdate>()
+    val ingredientUpdates = mutableListOf<CocktailIngredientAvailabilityUpdate>()
+
+    for (item in items) {
+        val sortedIngredients = item.ingredients.sortedBy { it.sort }
+        if (toggledIngredientIds != null && shelfIngredientIds.isNotEmpty() && item.cocktail.inBarShelf) {
+            val isServerUnhydrated = sortedIngredients.any { ing ->
+                !ing.optional &&
+                    !(ing.inBarShelf || ing.inBarShelfAsSubstitute || ing.inBarShelfAsVariant || ing.inBarShelfAsComplex)
+            }
+            if (isServerUnhydrated) {
+                val anyAffected = sortedIngredients.any { ing ->
+                    hierarchy.intersectsFamily(ing.ingredientId, toggledIngredientIds) ||
+                        decodeStoredList<StoredIngredientSubstitute>(ing.substitutesJson).any { sub ->
+                            hierarchy.intersectsFamily(sub.id, toggledIngredientIds)
+                        }
+                }
+                if (!anyAffected) {
+                    continue
+                }
+            }
+        }
+
+        val cocktailUpdatedIngredients = ArrayList<CocktailIngredientEntity>(sortedIngredients.size)
+        for (ing in sortedIngredients) {
+            val newInBarShelf = ing.ingredientId in shelfIngredientIds
+            val updatedSubs = decodeStoredList<StoredIngredientSubstitute>(ing.substitutesJson).map { sub ->
+                sub.copy(inBarShelf = sub.id in shelfIngredientIds)
+            }
+            val newSubstitutesJson = StorageJson.encodeToString(updatedSubs)
+            val newInBarShelfAsSubstitute = updatedSubs.any { it.inBarShelf }
+            val newInBarShelfAsVariant = when {
+                ing.isSpecified -> false
+                shelfIngredientIds.isEmpty() -> false
+                hasCatalogHierarchy -> hierarchy.hasDescendantInShelf(ing.ingredientId, shelfIngredientIds)
+                else -> ing.inBarShelfAsVariant
+            }
+            val newInBarShelfAsComplex = if (shelfIngredientIds.isEmpty()) false else ing.inBarShelfAsComplex
+
+            val updatedIng = ing.copy(
+                inBarShelf = newInBarShelf,
+                inBarShelfAsSubstitute = newInBarShelfAsSubstitute,
+                inBarShelfAsVariant = newInBarShelfAsVariant,
+                inBarShelfAsComplex = newInBarShelfAsComplex,
+                substitutesJson = newSubstitutesJson,
+            )
+            cocktailUpdatedIngredients += updatedIng
+
+            if (updatedIng != ing) {
+                ingredientUpdates += CocktailIngredientAvailabilityUpdate(
+                    cocktailId = updatedIng.cocktailId,
+                    ingredientId = updatedIng.ingredientId,
+                    sort = updatedIng.sort,
+                    inBarShelf = updatedIng.inBarShelf,
+                    inBarShelfAsSubstitute = updatedIng.inBarShelfAsSubstitute,
+                    inBarShelfAsVariant = updatedIng.inBarShelfAsVariant,
+                    inBarShelfAsComplex = updatedIng.inBarShelfAsComplex,
+                    substitutesJson = updatedIng.substitutesJson,
+                )
+            }
+        }
+
+        val missingNames = cocktailUpdatedIngredients
+            .filter { ing ->
+                !ing.optional &&
+                    !(ing.inBarShelf || ing.inBarShelfAsSubstitute || ing.inBarShelfAsVariant || ing.inBarShelfAsComplex)
+            }
+            .map { it.ingredientName }
+            .distinct()
+
+        val hasRequiredIngredient = cocktailUpdatedIngredients.any { !it.optional }
+        val newCocktailInBarShelf = hasRequiredIngredient && missingNames.isEmpty()
+        val newMissingCount = missingNames.size
+        val newMissingNamesJson = StorageJson.encodeToString(missingNames)
+        if (item.cocktail.inBarShelf != newCocktailInBarShelf ||
+            item.cocktail.missingIngredientsCount != newMissingCount ||
+            item.cocktail.missingIngredientNamesJson != newMissingNamesJson
+        ) {
+            cocktailUpdates += CocktailAvailabilityUpdate(
+                cocktailId = item.cocktail.id,
+                inBarShelf = newCocktailInBarShelf,
+                missingIngredientsCount = newMissingCount,
+                missingIngredientNamesJson = newMissingNamesJson,
+            )
+        }
+    }
+
+    return CocktailAvailabilityRecalculation(
+        cocktailUpdates = cocktailUpdates,
+        ingredientUpdates = ingredientUpdates,
+    )
+}
+
+fun ShoppingListEntity.toModel(ingredient: IngredientEntity?): ShoppingListItem = ShoppingListItem(
+    ingredientId = ingredientId,
+    ingredientSlug = ingredient?.slug ?: ingredientId.toString(),
+    ingredientName = ingredient?.name ?: "Ingredient #$ingredientId",
+    categoryName = ingredient?.categoryName,
+    quantity = quantity.coerceAtLeast(1),
+    mainImageThumbUrl = ingredient?.mainImageThumbUrl,
+)
+
+fun ShoppingListItemDto.toEntity(barId: Int): ShoppingListEntity = ShoppingListEntity(
+    barId = barId,
+    ingredientId = ingredient.id,
+    quantity = (quantity ?: 1).coerceAtLeast(1),
+)
+
+fun IngredientRecommendDto.toModel(
+    ingredient: IngredientEntity?,
+    inShoppingList: Boolean,
+): RecommendedIngredient = RecommendedIngredient(
+    id = id,
+    slug = slug,
+    name = name,
+    potentialCocktails = potentialCocktails,
+    categoryName = ingredient?.categoryName,
+    mainImageThumbUrl = ingredient?.mainImageThumbUrl,
+    inShoppingList = inShoppingList,
+)
+
+fun CocktailBasicDto.toUnlockedCocktail(): UnlockedCocktail = UnlockedCocktail(
+    id = id,
+    slug = slug,
     name = name,
 )
 

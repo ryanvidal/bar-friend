@@ -131,11 +131,15 @@ class DefaultAuthRepository(
         }
 
         val chosen = bars.firstOrNull { it.status.equals("active", ignoreCase = true) } ?: bars.first()
+        val resolvedUserId = runSuspendCatching {
+            api.getProfile(normalized, tokenDto.token).id
+        }.getOrNull()
         sessionRepository.saveSession(
             serverUrl = normalized,
             token = tokenDto.token,
             barId = chosen.id,
             barName = chosen.name,
+            userId = resolvedUserId,
         )
 
         return Result.success(
@@ -152,8 +156,7 @@ class DefaultAuthRepository(
 
     override suspend fun signOut(): Result<Unit> = try {
         withTimeoutOrNull(LOGOUT_TIMEOUT_MILLIS) {
-            runCatching { api.logout() }
-                .onFailure { if (it is CancellationException) throw it }
+            runSuspendCatching { api.logout() }
         }
         withContext(NonCancellable) {
             sessionRepository.clearSession()

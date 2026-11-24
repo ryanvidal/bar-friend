@@ -26,6 +26,7 @@ data class UserSettings(
     val serverUrl: String? = null,
     val activeBarId: Int? = null,
     val activeBarName: String? = null,
+    val activeUserId: Int? = null,
     val preferredUnit: VolumeUnit = VolumeUnit.OZ,
     val themeMode: AppThemeMode = AppThemeMode.DARK,
 )
@@ -40,6 +41,7 @@ class AppPreferences(
             serverUrl = prefs[KEY_SERVER_URL],
             activeBarId = prefs[KEY_ACTIVE_BAR_ID],
             activeBarName = prefs[KEY_ACTIVE_BAR_NAME],
+            activeUserId = prefs[KEY_USER_ID],
             preferredUnit = VolumeUnit.fromApiKeyOrNull(prefs[KEY_PREFERRED_UNIT]) ?: VolumeUnit.OZ,
             themeMode = prefs[KEY_THEME_MODE]?.let { raw ->
                 AppThemeMode.entries.firstOrNull { it.name == raw }
@@ -77,10 +79,21 @@ class AppPreferences(
         }
     }
 
+    suspend fun setActiveUserId(userId: Int?) {
+        dataStore.edit { prefs ->
+            if (userId != null) {
+                prefs[KEY_USER_ID] = userId
+            } else {
+                prefs.remove(KEY_USER_ID)
+            }
+        }
+    }
+
     suspend fun clearSessionMetadata() {
         dataStore.edit { prefs ->
             prefs.remove(KEY_ACTIVE_BAR_ID)
             prefs.remove(KEY_ACTIVE_BAR_NAME)
+            prefs.remove(KEY_USER_ID)
         }
     }
 
@@ -88,6 +101,7 @@ class AppPreferences(
         val KEY_SERVER_URL = stringPreferencesKey("server_url")
         val KEY_ACTIVE_BAR_ID = intPreferencesKey("active_bar_id")
         val KEY_ACTIVE_BAR_NAME = stringPreferencesKey("active_bar_name")
+        val KEY_USER_ID = intPreferencesKey("user_id")
         val KEY_PREFERRED_UNIT = stringPreferencesKey("preferred_unit")
         val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
     }

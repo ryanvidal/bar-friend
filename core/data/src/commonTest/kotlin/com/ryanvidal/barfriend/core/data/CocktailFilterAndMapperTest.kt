@@ -12,6 +12,8 @@ import com.ryanvidal.barfriend.core.network.dto.CocktailMethodDto
 import com.ryanvidal.barfriend.core.network.dto.GlassDto
 import com.ryanvidal.barfriend.core.network.dto.ImageDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientBasicDto
+import com.ryanvidal.barfriend.core.network.dto.IngredientDto
+import com.ryanvidal.barfriend.core.network.dto.IngredientHierarchyDto
 import com.ryanvidal.barfriend.core.network.dto.ScrapeResponseDto
 import com.ryanvidal.barfriend.core.network.dto.ScrapedImageDto
 import com.ryanvidal.barfriend.core.network.dto.ScrapedIngredientDto
@@ -155,6 +157,42 @@ class CocktailFilterAndMapperTest {
         assertEquals(0, entity.missingIngredientsCount)
         assertTrue(entity.inBarShelf)
         assertEquals(emptyList(), CocktailWithIngredients(entity, ingredients).toCocktailSummary().missingIngredientNames)
+    }
+
+    @Test
+    fun `all-optional cocktail is not marked makeable and ingredient hierarchy maps parent and category`() {
+        val optionalDto = CocktailDto(
+            id = 12,
+            slug = "bitters-dash",
+            name = "Bitters Dash",
+            instructions = "Dash.",
+            ingredients = listOf(
+                CocktailIngredientDto(
+                    sort = 1,
+                    amount = 1.0,
+                    units = "dash",
+                    optional = true,
+                    ingredient = IngredientBasicDto(4, "bitters", "Bitters"),
+                ),
+            ),
+            inBarShelf = false,
+        )
+        val (optEntity, _) = optionalDto.toEntityAndIngredients(barId = 1)
+        assertFalse(optEntity.inBarShelf)
+
+        val ingredientDto = IngredientDto(
+            id = 20,
+            slug = "london-dry-gin",
+            name = "London Dry Gin",
+            hierarchy = IngredientHierarchyDto(
+                rootIngredientId = 1,
+                parentIngredient = IngredientBasicDto(1, "gin", "Gin"),
+                ancestors = listOf(IngredientBasicDto(1, "gin", "Gin")),
+            ),
+        )
+        val ingEntity = ingredientDto.toEntity(barId = 1)
+        assertEquals("Gin", ingEntity.categoryName)
+        assertEquals(1, ingEntity.parentIngredientId)
     }
 
     @Test

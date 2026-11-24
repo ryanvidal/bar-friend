@@ -23,6 +23,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -54,6 +55,7 @@ import com.ryanvidal.barfriend.feature.cocktails.CocktailsListScreen
 import com.ryanvidal.barfriend.feature.cocktails.CocktailsListViewModel
 import com.ryanvidal.barfriend.feature.inventory.InventoryRoute
 import com.ryanvidal.barfriend.feature.inventory.InventoryScreen
+import com.ryanvidal.barfriend.feature.inventory.InventoryViewModel
 import com.ryanvidal.barfriend.feature.settings.SettingsRoute
 import com.ryanvidal.barfriend.feature.settings.SettingsScreen
 import com.ryanvidal.barfriend.feature.settings.SettingsViewModel
@@ -87,9 +89,12 @@ private val BarFriendNavSavedStateConfig = SavedStateConfiguration {
 @Composable
 internal fun MainShell(
     appGraph: AppGraph,
+    serverUrl: String,
     activeBarId: Int?,
 ) {
+    val sessionScopeKey = remember(serverUrl, activeBarId) { "$serverUrl|${activeBarId ?: "none"}" }
     var activeTab by rememberSaveable { mutableStateOf(BarFriendTab.COCKTAILS) }
+    val latestActiveTab by rememberUpdatedState(activeTab)
     var nextEditorSessionId by rememberSaveable { mutableLongStateOf(1L) }
 
     val cocktailsStack = rememberNavBackStack(BarFriendNavSavedStateConfig, CocktailsListRoute)
@@ -108,112 +113,128 @@ internal fun MainShell(
         )
     }
 
-    val provider = remember(appGraph, cocktailsStack, activeBarId) {
-        entryProvider<NavKey> {
-            entry<CocktailsListRoute> {
-                val listViewModel = viewModel(key = "cocktails_list_${activeBarId ?: "none"}") {
-                    CocktailsListViewModel(appGraph.cocktailRepository)
-                }
-                CocktailsListScreen(
-                    viewModel = listViewModel,
-                    onOpenCocktail = { id ->
-                        if (cocktailsStack.lastOrNull() == CocktailsListRoute) {
-                            cocktailsStack.add(CocktailDetailRoute(id))
-                        }
-                    },
-                    onAddRecipe = {
-                        if (cocktailsStack.lastOrNull() == CocktailsListRoute) {
-                            val sessionId = nextEditorSessionId++
-                            cocktailsStack.add(CocktailEditorRoute(sessionId = sessionId))
-                        }
-                    },
-                    onImportFromUrl = { url ->
-                        if (cocktailsStack.lastOrNull() == CocktailsListRoute) {
-                            val sessionId = nextEditorSessionId++
-                            cocktailsStack.add(
-                                CocktailEditorRoute(
-                                    initialImportUrl = url,
-                                    sessionId = sessionId,
-                                ),
-                            )
-                        }
-                    },
-                )
-            }
-            entry<CocktailDetailRoute> { route ->
-                val detailViewModel = viewModel(
-                    key = "cocktail_detail_${activeBarId ?: "none"}_${route.cocktailId}",
-                ) {
-                    CocktailDetailViewModel(
-                        cocktailId = route.cocktailId,
-                        cocktailRepository = appGraph.cocktailRepository,
-                        appPreferences = appGraph.appPreferences,
-                    )
-                }
-                CocktailDetailScreen(
-                    viewModel = detailViewModel,
-                    onBack = { popExpectedRoute(cocktailsStack, route) },
-                    onEditCocktail = { id ->
-                        if (cocktailsStack.lastOrNull() == route) {
-                            val sessionId = nextEditorSessionId++
-                            cocktailsStack.add(
-                                CocktailEditorRoute(
-                                    cocktailId = id,
-                                    sessionId = sessionId,
-                                ),
-                            )
-                        }
-                    },
-                )
-            }
-            entry<CocktailEditorRoute> { route ->
-                val editorViewModel = viewModel(
-                    key = "cocktail_editor_${activeBarId ?: "none"}_${route.sessionId}_${route.cocktailId}_${route.initialImportUrl}",
-                ) {
-                    CocktailEditorViewModel(
-                        cocktailId = route.cocktailId,
-                        initialImportUrl = route.initialImportUrl,
-                        cocktailRepository = appGraph.cocktailRepository,
-                    )
-                }
-                CocktailEditorScreen(
-                    viewModel = editorViewModel,
-                    onBack = { popExpectedRoute(cocktailsStack, route) },
-                    onSaved = { savedId ->
-                        popExpectedRoute(cocktailsStack, route)
-                        if (route.cocktailId == null && cocktailsStack.lastOrNull() == CocktailsListRoute) {
-                            cocktailsStack.add(CocktailDetailRoute(savedId))
-                        }
-                    },
-                )
-            }
-            entry<InventoryRoute> {
-                InventoryScreen()
-            }
-            entry<SettingsRoute> {
-                val settingsViewModel = viewModel(key = "settings") {
-                    SettingsViewModel(
-                        appPreferences = appGraph.appPreferences,
-                        sessionRepository = appGraph.sessionRepository,
-                        authRepository = appGraph.authRepository,
-                        cocktailRepository = appGraph.cocktailRepository,
-                    )
-                }
-                SettingsScreen(viewModel = settingsViewModel)
-            }
-        }
-    }
-
     val decoratedTabs: Map<BarFriendTab, List<NavEntry<NavKey>>> = backStacks.mapValues { (tab, stack) ->
-        key(tab) {
-            val viewModelStoreProvider = rememberViewModelStoreProvider(key = "tab_${tab.name}")
+        key(sessionScopeKey, tab) {
+            val viewModelStoreProvider = rememberViewModelStoreProvider(
+                key = "tab_${sessionScopeKey}_${tab.name}",
+            )
+            val tabEntryProvider = remember(appGraph, stack, tab, sessionScopeKey) {
+                entryProvider<NavKey> {
+                    entry<CocktailsListRoute> {
+                        val listViewModel = viewModel(key = "cocktails_list_$sessionScopeKey") {
+                            CocktailsListViewModel(appGraph.cocktailRepository)
+                        }
+                        CocktailsListScreen(
+                            viewModel = listViewModel,
+                            onOpenCocktail = { id ->
+                                if (latestActiveTab == tab && stack.lastOrNull() == CocktailsListRoute) {
+                                    stack.add(CocktailDetailRoute(id))
+                                }
+                            },
+                            onAddRecipe = {
+                                if (latestActiveTab == tab && stack.lastOrNull() == CocktailsListRoute) {
+                                    val sessionId = nextEditorSessionId++
+                                    stack.add(CocktailEditorRoute(sessionId = sessionId))
+                                }
+                            },
+                            onImportFromUrl = { url ->
+                                if (latestActiveTab == tab && stack.lastOrNull() == CocktailsListRoute) {
+                                    val sessionId = nextEditorSessionId++
+                                    stack.add(
+                                        CocktailEditorRoute(
+                                            initialImportUrl = url,
+                                            sessionId = sessionId,
+                                        ),
+                                    )
+                                }
+                            },
+                        )
+                    }
+                    entry<CocktailDetailRoute> { route ->
+                        val detailViewModel = viewModel(
+                            key = "cocktail_detail_${sessionScopeKey}_${tab.name}_${route.cocktailId}",
+                        ) {
+                            CocktailDetailViewModel(
+                                cocktailId = route.cocktailId,
+                                cocktailRepository = appGraph.cocktailRepository,
+                                inventoryRepository = appGraph.inventoryRepository,
+                                appPreferences = appGraph.appPreferences,
+                            )
+                        }
+                        CocktailDetailScreen(
+                            viewModel = detailViewModel,
+                            onBack = { popExpectedRoute(stack, route) },
+                            onEditCocktail = { id ->
+                                if (latestActiveTab == tab && stack.lastOrNull() == route) {
+                                    val sessionId = nextEditorSessionId++
+                                    stack.add(
+                                        CocktailEditorRoute(
+                                            cocktailId = id,
+                                            sessionId = sessionId,
+                                        ),
+                                    )
+                                }
+                            },
+                        )
+                    }
+                    entry<CocktailEditorRoute> { route ->
+                        val editorViewModel = viewModel(
+                            key = "cocktail_editor_${sessionScopeKey}_${tab.name}_${route.sessionId}_${route.cocktailId}_${route.initialImportUrl}",
+                        ) {
+                            CocktailEditorViewModel(
+                                cocktailId = route.cocktailId,
+                                initialImportUrl = route.initialImportUrl,
+                                cocktailRepository = appGraph.cocktailRepository,
+                            )
+                        }
+                        CocktailEditorScreen(
+                            viewModel = editorViewModel,
+                            onBack = { popExpectedRoute(stack, route) },
+                            onSaved = { savedId ->
+                                popExpectedRoute(stack, route)
+                                val top = stack.lastOrNull()
+                                if (route.cocktailId == null && (top == CocktailsListRoute || top == InventoryRoute)) {
+                                    stack.add(CocktailDetailRoute(savedId))
+                                }
+                            },
+                        )
+                    }
+                    entry<InventoryRoute> {
+                        val inventoryViewModel = viewModel(key = "inventory_$sessionScopeKey") {
+                            InventoryViewModel(
+                                inventoryRepository = appGraph.inventoryRepository,
+                                cocktailRepository = appGraph.cocktailRepository,
+                            )
+                        }
+                        InventoryScreen(
+                            viewModel = inventoryViewModel,
+                            onOpenCocktail = { id ->
+                                if (latestActiveTab == tab && stack.lastOrNull() == InventoryRoute) {
+                                    stack.add(CocktailDetailRoute(id))
+                                }
+                            },
+                        )
+                    }
+                    entry<SettingsRoute> {
+                        val settingsViewModel = viewModel(key = "settings_$sessionScopeKey") {
+                            SettingsViewModel(
+                                appPreferences = appGraph.appPreferences,
+                                sessionRepository = appGraph.sessionRepository,
+                                authRepository = appGraph.authRepository,
+                                cocktailRepository = appGraph.cocktailRepository,
+                            )
+                        }
+                        SettingsScreen(viewModel = settingsViewModel)
+                    }
+                }
+            }
             rememberDecoratedNavEntries(
                 backStack = stack,
                 entryDecorators = listOf(
                     rememberSaveableStateHolderNavEntryDecorator(),
                     rememberViewModelStoreNavEntryDecorator(viewModelStoreProvider),
                 ),
-                entryProvider = provider,
+                entryProvider = tabEntryProvider,
             )
         }
     }
@@ -222,7 +243,7 @@ internal fun MainShell(
         if (activeTab == BarFriendTab.COCKTAILS) {
             decoratedTabs[BarFriendTab.COCKTAILS].orEmpty()
         } else {
-            decoratedTabs[BarFriendTab.COCKTAILS].orEmpty() + decoratedTabs[activeTab].orEmpty()
+            decoratedTabs[BarFriendTab.COCKTAILS].orEmpty().take(1) + decoratedTabs[activeTab].orEmpty()
         }
     }
 

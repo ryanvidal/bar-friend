@@ -2,6 +2,8 @@ package com.ryanvidal.barfriend.core.network
 
 import com.ryanvidal.barfriend.core.network.dto.ApiErrorDto
 import com.ryanvidal.barfriend.core.network.dto.BarDto
+import com.ryanvidal.barfriend.core.network.dto.BarInventoryBatchRequestDto
+import com.ryanvidal.barfriend.core.network.dto.CocktailBasicDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailMethodDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailWriteRequestDto
@@ -10,11 +12,18 @@ import com.ryanvidal.barfriend.core.network.dto.GlassDto
 import com.ryanvidal.barfriend.core.network.dto.ImageDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientBasicDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientDto
+import com.ryanvidal.barfriend.core.network.dto.IngredientRecommendDto
 import com.ryanvidal.barfriend.core.network.dto.LoginRequestDto
 import com.ryanvidal.barfriend.core.network.dto.PaginatedEnvelope
+import com.ryanvidal.barfriend.core.network.dto.ProfileDto
 import com.ryanvidal.barfriend.core.network.dto.ScrapeRequestDto
 import com.ryanvidal.barfriend.core.network.dto.ScrapeResponseDto
 import com.ryanvidal.barfriend.core.network.dto.ServerVersionDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListBatchDeleteRequestDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListBatchStoreRequestDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListIngredientIdDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListIngredientInputDto
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListItemDto
 import com.ryanvidal.barfriend.core.network.dto.TagDto
 import com.ryanvidal.barfriend.core.network.dto.ToggleFavoriteDto
 import com.ryanvidal.barfriend.core.network.dto.TokenDto
@@ -32,6 +41,7 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.forms.formData
 import io.ktor.client.request.forms.submitFormWithBinaryData
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.put
@@ -95,6 +105,15 @@ interface BarAssistantApi {
         page: Int = 1,
         perPage: Int = 200,
     ): PaginatedEnvelope<IngredientBasicDto>
+    suspend fun getProfile(): ProfileDto
+    suspend fun getProfile(serverUrl: String, token: String): ProfileDto
+    suspend fun addBarInventoryIngredients(barId: Int, ingredientIds: List<Int>)
+    suspend fun removeBarInventoryIngredients(barId: Int, ingredientIds: List<Int>)
+    suspend fun getRecommendedBarIngredients(barId: Int): List<IngredientRecommendDto>
+    suspend fun getExtraCocktailsForIngredient(barId: Int, ingredientId: Int): List<CocktailBasicDto>
+    suspend fun getShoppingList(barId: Int, userId: Int): List<ShoppingListItemDto>
+    suspend fun addToShoppingList(barId: Int, userId: Int, items: List<ShoppingListIngredientInputDto>)
+    suspend fun removeFromShoppingList(barId: Int, userId: Int, ingredientIds: List<Int>)
 }
 
 @SingleIn(AppScope::class)
@@ -318,6 +337,7 @@ class KtorBarAssistantApi(
         val response = httpClient.get("$base/ingredients") {
             parameter("page", page)
             parameter("per_page", perPage)
+            parameter("include", "images,parentIngredient,ancestors")
         }
         return response.decodeSuccess()
     }
@@ -372,6 +392,118 @@ class KtorBarAssistantApi(
             parameter("per_page", perPage)
         }
         return response.decodeSuccess()
+    }
+
+    override suspend fun getProfile(): ProfileDto {
+        val base = requireApiBaseUrl()
+        val response = httpClient.get("$base/profile")
+        return response.decodeSuccess<DataEnvelope<ProfileDto>>().data
+    }
+
+    override suspend fun getProfile(serverUrl: String, token: String): ProfileDto {
+        val normalized = ServerUrlNormalizer.normalize(serverUrl)
+        val base = ServerUrlNormalizer.apiBaseUrl(normalized)
+        val response = httpClient.get("$base/profile") {
+            attributes.put(ExplicitAuthContextKey, ExplicitAuthContext(normalized, token))
+        }
+        return response.decodeSuccess<DataEnvelope<ProfileDto>>().data
+    }
+
+    override suspend fun addBarInventoryIngredients(barId: Int, ingredientIds: List<Int>) {
+        val base = requireApiBaseUrl()
+        postJson(
+            url = "$base/bars/$barId/inventory/ingredients/batch-store",
+            bodyJson = BarAssistantJson.encodeToString(
+                BarInventoryBatchRequestDto.serializer(),
+                BarInventoryBatchRequestDto(ingredientIds),
+            ),
+            barId = barId,
+        )
+    }
+
+    override suspend fun removeBarInventoryIngredients(barId: Int, ingredientIds: List<Int>) {
+        val base = requireApiBaseUrl()
+        postJson(
+            url = "$base/bars/$barId/inventory/ingredients/batch-delete",
+            bodyJson = BarAssistantJson.encodeToString(
+                BarInventoryBatchRequestDto.serializer(),
+                BarInventoryBatchRequestDto(ingredientIds),
+            ),
+            barId = barId,
+        )
+    }
+
+    override suspend fun getRecommendedBarIngredients(barId: Int): List<IngredientRecommendDto> {
+        val base = requireApiBaseUrl()
+        val response = httpClient.get("$base/bars/$barId/inventory/ingredients/recommend") {
+            header(HEADER_BAR_ID, barId.toString())
+        }
+        return response.decodeSuccess<DataEnvelope<List<IngredientRecommendDto>>>().data
+    }
+
+    override suspend fun getExtraCocktailsForIngredient(
+        barId: Int,
+        ingredientId: Int,
+    ): List<CocktailBasicDto> {
+        val base = requireApiBaseUrl()
+        val response = httpClient.get("$base/bars/$barId/inventory/ingredients/$ingredientId/extra") {
+            header(HEADER_BAR_ID, barId.toString())
+        }
+        return response.decodeSuccess<DataEnvelope<List<CocktailBasicDto>>>().data
+    }
+
+    override suspend fun getShoppingList(barId: Int, userId: Int): List<ShoppingListItemDto> {
+        val base = requireApiBaseUrl()
+        val response = httpClient.get("$base/members/$userId/shopping-list") {
+            header(HEADER_BAR_ID, barId.toString())
+        }
+        return response.decodeSuccess<DataEnvelope<List<ShoppingListItemDto>>>().data
+    }
+
+    override suspend fun addToShoppingList(
+        barId: Int,
+        userId: Int,
+        items: List<ShoppingListIngredientInputDto>,
+    ) {
+        val base = requireApiBaseUrl()
+        postJson(
+            url = "$base/members/$userId/shopping-list/batch-store",
+            bodyJson = BarAssistantJson.encodeToString(
+                ShoppingListBatchStoreRequestDto.serializer(),
+                ShoppingListBatchStoreRequestDto(items),
+            ),
+            barId = barId,
+        )
+    }
+
+    override suspend fun removeFromShoppingList(
+        barId: Int,
+        userId: Int,
+        ingredientIds: List<Int>,
+    ) {
+        val base = requireApiBaseUrl()
+        postJson(
+            url = "$base/members/$userId/shopping-list/batch-delete",
+            bodyJson = BarAssistantJson.encodeToString(
+                ShoppingListBatchDeleteRequestDto.serializer(),
+                ShoppingListBatchDeleteRequestDto(
+                    ingredientIds.map { ShoppingListIngredientIdDto(it) },
+                ),
+            ),
+            barId = barId,
+        )
+    }
+
+    private suspend fun postJson(url: String, bodyJson: String, barId: Int? = null) {
+        val response = httpClient.post(url) {
+            if (barId != null) {
+                header(HEADER_BAR_ID, barId.toString())
+            }
+            setBody(TextContent(bodyJson, ContentType.Application.Json))
+        }
+        if (!response.status.isSuccess()) {
+            throw response.toApiException()
+        }
     }
 
     private fun parseCocktailSlugOrIdFromLocation(base: String, location: String): String? {

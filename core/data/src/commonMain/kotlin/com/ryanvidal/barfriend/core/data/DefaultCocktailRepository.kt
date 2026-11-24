@@ -21,6 +21,7 @@ import com.ryanvidal.barfriend.core.network.dto.GlassDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientBasicDto
 import com.ryanvidal.barfriend.core.network.dto.IngredientDto
 import com.ryanvidal.barfriend.core.network.dto.PaginatedEnvelope
+import com.ryanvidal.barfriend.core.network.dto.ShoppingListItemDto
 import com.ryanvidal.barfriend.core.network.dto.TagDto
 import com.ryanvidal.barfriend.core.network.dto.UtensilDto
 import dev.zacsweers.metro.AppScope
@@ -63,11 +64,11 @@ class DefaultCocktailRepository(
     private val inventoryDao: InventoryDao,
     private val catalogDao: CatalogDao,
     private val syncDao: SyncDao,
+    private val mutationCoordinator: BarMutationCoordinator,
 ) : CocktailRepository {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val syncMutex = Mutex()
-    private val mutationMutex = Mutex()
     private val favoriteMutexMapLock = Mutex()
     private val favoriteMutexes = mutableMapOf<Int, Mutex>()
     private val _syncStatus = MutableStateFlow(SyncStatus())
@@ -77,7 +78,6 @@ class DefaultCocktailRepository(
 
     @Volatile
     private var lastSyncedSession: Pair<String, Int>? = null
-    private var mutationGeneration: Long = 0L
 
     init {
         repositoryScope.launch {
@@ -184,14 +184,21 @@ class DefaultCocktailRepository(
             }
         }
 
-    override suspend fun syncAll(force: Boolean): Result<Unit> = syncMutex.withLock {
+    override suspend fun syncAll(force: Boolean): Result<Unit> = syncInternal(force = force, silent = false)
+
+    override suspend fun syncAllSilent(force: Boolean): Result<Unit> = syncInternal(force = force, silent = true)
+
+    private suspend fun syncInternal(force: Boolean, silent: Boolean): Result<Unit> = syncMutex.withLock {
         val barId = currentActiveBarId()
         val serverUrl = currentServerUrl()
         if (barId == null || serverUrl.isNullOrBlank()) {
-            _syncStatus.value = SyncStatus(
-                isSyncing = false,
-                lastSyncedEpochMillis = null,
-                errorMessage = "No active bar selected.",
+            publishInteractiveSyncStatus(
+                silent = silent,
+                status = SyncStatus(
+                    isSyncing = false,
+                    lastSyncedEpochMillis = null,
+                    errorMessage = "No active bar selected.",
+                ),
             )
             return@withLock Result.failure(IllegalStateException("No active bar selected."))
         }
@@ -204,14 +211,17 @@ class DefaultCocktailRepository(
         val previousTimestamp = _syncStatus.value.lastSyncedEpochMillis
             ?: catalogDao.getSyncTimestamp(syncKey(barId))
         try {
-            _syncStatus.value = SyncStatus(
-                isSyncing = true,
-                lastSyncedEpochMillis = previousTimestamp,
-                errorMessage = null,
+            publishInteractiveSyncStatus(
+                silent = silent,
+                status = SyncStatus(
+                    isSyncing = true,
+                    lastSyncedEpochMillis = previousTimestamp,
+                    errorMessage = null,
+                ),
             )
 
             for (attempt in 1..MAX_SYNC_ATTEMPTS) {
-                val startGen = mutationMutex.withLock { mutationGeneration }
+                val startGen = mutationCoordinator.withMutationLock { mutationCoordinator.currentGenerationLocked() }
                 val payload = fetchSyncPayload(barId)
 
                 if (!isSessionStillActive(serverUrl, barId)) {
@@ -236,9 +246,14 @@ class DefaultCocktailRepository(
                 val utensilEntities = payload.utensils.distinctBy { it.id }
                     .map { it.toEntity(barId) }
                 val shelfIds = payload.shelfIngredients.map { it.id }.distinct()
+                val shoppingListEntities = payload.shoppingListItems
+                    ?.distinctBy { it.ingredient.id }
+                    ?.map { it.toEntity(barId) }
 
-                val wroteSnapshot = mutationMutex.withLock {
-                    if (!isSessionStillActive(serverUrl, barId) || mutationGeneration != startGen) {
+                val wroteSnapshot = mutationCoordinator.withMutationLock {
+                    if (!isSessionStillActive(serverUrl, barId) ||
+                        mutationCoordinator.currentGenerationLocked() != startGen
+                    ) {
                         false
                     } else {
                         val now = Clock.System.now().toEpochMilliseconds()
@@ -254,6 +269,7 @@ class DefaultCocktailRepository(
                             shelfIngredientIds = shelfIds,
                             syncKey = syncKey(barId),
                             syncedAtEpochMillis = now,
+                            shoppingListItems = shoppingListEntities,
                         )
                         lastSyncedSession = sessionKey
                         _syncStatus.value = SyncStatus(
@@ -276,18 +292,26 @@ class DefaultCocktailRepository(
                 }
             }
 
-            _syncStatus.value = SyncStatus(
-                isSyncing = false,
-                lastSyncedEpochMillis = previousTimestamp,
-                errorMessage = null,
+            // All retry attempts were superseded by concurrent mutations; keep existing status if silent
+            // because no snapshot was written.
+            publishInteractiveSyncStatus(
+                silent = silent,
+                status = SyncStatus(
+                    isSyncing = false,
+                    lastSyncedEpochMillis = previousTimestamp,
+                    errorMessage = null,
+                ),
             )
             Result.success(Unit)
         } catch (e: CancellationException) {
             if (isSessionStillActive(serverUrl, barId)) {
-                _syncStatus.value = SyncStatus(
-                    isSyncing = false,
-                    lastSyncedEpochMillis = previousTimestamp,
-                    errorMessage = null,
+                publishInteractiveSyncStatus(
+                    silent = silent,
+                    status = SyncStatus(
+                        isSyncing = false,
+                        lastSyncedEpochMillis = previousTimestamp,
+                        errorMessage = null,
+                    ),
                 )
             } else if (sessionRepository.sessionState.value is SessionState.Unauthenticated) {
                 _syncStatus.value = SyncStatus()
@@ -295,22 +319,25 @@ class DefaultCocktailRepository(
             throw e
         } catch (e: Throwable) {
             if (isSessionStillActive(serverUrl, barId)) {
-                _syncStatus.value = SyncStatus(
-                    isSyncing = false,
-                    lastSyncedEpochMillis = previousTimestamp,
-                    errorMessage = e.message?.takeIf { it.isNotBlank() } ?: "Sync failed.",
+                publishInteractiveSyncStatus(
+                    silent = silent,
+                    status = SyncStatus(
+                        isSyncing = false,
+                        lastSyncedEpochMillis = previousTimestamp,
+                        errorMessage = e.message?.takeIf { it.isNotBlank() } ?: "Sync failed.",
+                    ),
                 )
             }
             Result.failure(e)
         }
     }
 
-    override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> = runApiCall {
+    override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> = runSuspendCatching {
         val barId = requireActiveBarId()
         val serverUrl = currentServerUrl()
         val dto = api.getCocktail(cocktailId.toString())
-        mutationMutex.withLock {
-            mutationGeneration += 1
+        mutationCoordinator.withMutationLock {
+            mutationCoordinator.bumpGenerationLocked()
             if (currentActiveBarId() != barId) {
                 throw IllegalStateException("Active bar changed during cocktail refresh.")
             }
@@ -323,23 +350,23 @@ class DefaultCocktailRepository(
             val barId = currentActiveBarId()
                 ?: return@withLock Result.failure(IllegalStateException("No active bar selected."))
             val existing = cocktailDao.observeCocktailWithIngredients(barId, cocktailId).first()
-                ?: return@withLock runApiCall {
+                ?: return@withLock runSuspendCatching {
                     val actual = api.toggleFavorite(cocktailId)
-                    mutationMutex.withLock { mutationGeneration += 1 }
+                    mutationCoordinator.withMutationLock { mutationCoordinator.bumpGenerationLocked() }
                     actual
                 }
 
             val previous = existing.cocktail.isFavorite
             val optimistic = !previous
-            mutationMutex.withLock {
-                mutationGeneration += 1
+            mutationCoordinator.withMutationLock {
+                mutationCoordinator.bumpGenerationLocked()
                 cocktailDao.updateFavorite(barId, cocktailId, optimistic)
             }
 
             try {
                 val actual = api.toggleFavorite(cocktailId)
-                mutationMutex.withLock {
-                    mutationGeneration += 1
+                mutationCoordinator.withMutationLock {
+                    mutationCoordinator.bumpGenerationLocked()
                     if (currentActiveBarId() == barId && actual != optimistic) {
                         cocktailDao.updateFavorite(barId, cocktailId, actual)
                     }
@@ -347,8 +374,8 @@ class DefaultCocktailRepository(
                 Result.success(actual)
             } catch (e: CancellationException) {
                 withContext(NonCancellable) {
-                    mutationMutex.withLock {
-                        mutationGeneration += 1
+                    mutationCoordinator.withMutationLock {
+                        mutationCoordinator.bumpGenerationLocked()
                         if (currentActiveBarId() == barId) {
                             cocktailDao.updateFavorite(barId, cocktailId, previous)
                         }
@@ -356,8 +383,8 @@ class DefaultCocktailRepository(
                 }
                 throw e
             } catch (e: Throwable) {
-                mutationMutex.withLock {
-                    mutationGeneration += 1
+                mutationCoordinator.withMutationLock {
+                    mutationCoordinator.bumpGenerationLocked()
                     if (currentActiveBarId() == barId) {
                         cocktailDao.updateFavorite(barId, cocktailId, previous)
                     }
@@ -369,7 +396,7 @@ class DefaultCocktailRepository(
     override suspend fun saveCocktail(
         cocktailId: Int?,
         request: CocktailUpsertRequest,
-    ): Result<CocktailDetail> = runApiCall {
+    ): Result<CocktailDetail> = runSuspendCatching {
         val barId = requireActiveBarId()
         val serverUrl = currentServerUrl()
         val writeDto = request.toWriteDto()
@@ -378,8 +405,8 @@ class DefaultCocktailRepository(
         } else {
             api.updateCocktail(cocktailId, writeDto)
         }
-        mutationMutex.withLock {
-            mutationGeneration += 1
+        mutationCoordinator.withMutationLock {
+            mutationCoordinator.bumpGenerationLocked()
             if (currentActiveBarId() != barId) {
                 throw IllegalStateException("Active bar changed while saving cocktail.")
             }
@@ -390,11 +417,11 @@ class DefaultCocktailRepository(
         }
     }
 
-    override suspend fun deleteCocktail(cocktailId: Int): Result<Unit> = runApiCall {
+    override suspend fun deleteCocktail(cocktailId: Int): Result<Unit> = runSuspendCatching {
         val barId = requireActiveBarId()
         api.deleteCocktail(cocktailId)
-        mutationMutex.withLock {
-            mutationGeneration += 1
+        mutationCoordinator.withMutationLock {
+            mutationCoordinator.bumpGenerationLocked()
             if (currentActiveBarId() == barId) {
                 cocktailDao.deleteCocktailById(barId, cocktailId)
             }
@@ -406,7 +433,7 @@ class DefaultCocktailRepository(
         fileName: String,
         mimeType: String?,
         sort: Int,
-    ): Result<UploadedImage> = runApiCall {
+    ): Result<UploadedImage> = runSuspendCatching {
         val serverUrl = currentServerUrl()
         api.uploadImage(
             bytes = bytes,
@@ -420,7 +447,7 @@ class DefaultCocktailRepository(
         imageUrl: String,
         copyright: String?,
         sort: Int,
-    ): Result<UploadedImage> = runApiCall {
+    ): Result<UploadedImage> = runSuspendCatching {
         val serverUrl = currentServerUrl()
         api.uploadImageFromUrl(
             imageUrl = imageUrl,
@@ -429,7 +456,7 @@ class DefaultCocktailRepository(
         ).toUploadedImage(serverUrl)
     }
 
-    override suspend fun scrapeRecipeFromUrl(url: String): Result<ScrapedCocktail> = runApiCall {
+    override suspend fun scrapeRecipeFromUrl(url: String): Result<ScrapedCocktail> = runSuspendCatching {
         api.scrapeCocktail(url).toModel()
     }
 
@@ -480,6 +507,13 @@ class DefaultCocktailRepository(
         val shelfDeferred = async {
             fetchAllPages { page -> api.getBarInventoryIngredientIds(barId = barId, page = page, perPage = 200) }
         }
+        val shoppingListDeferred = async {
+            runSuspendCatching {
+                withResolvedUserIdAnd403Retry(api, sessionRepository) { userId ->
+                    api.getShoppingList(barId = barId, userId = userId)
+                }
+            }.getOrNull()
+        }
 
         SyncPayload(
             cocktails = cocktailsDeferred.await(),
@@ -489,6 +523,7 @@ class DefaultCocktailRepository(
             tags = tagsDeferred.await(),
             utensils = utensilsDeferred.await(),
             shelfIngredients = shelfDeferred.await(),
+            shoppingListItems = shoppingListDeferred.await(),
         )
     }
 
@@ -513,12 +548,10 @@ class DefaultCocktailRepository(
         (sessionRepository.sessionState.value as? SessionState.Authenticated)?.serverUrl
             ?: sessionRepository.currentServerUrl()
 
-    private suspend inline fun <T> runApiCall(block: suspend () -> T): Result<T> = try {
-        Result.success(block())
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Throwable) {
-        Result.failure(e)
+    private fun publishInteractiveSyncStatus(silent: Boolean, status: SyncStatus) {
+        if (!silent) {
+            _syncStatus.value = status
+        }
     }
 
     private fun syncKey(barId: Int): String = "bar_${barId}_sync"
@@ -531,6 +564,7 @@ class DefaultCocktailRepository(
         val tags: List<TagDto>,
         val utensils: List<UtensilDto>,
         val shelfIngredients: List<IngredientBasicDto>,
+        val shoppingListItems: List<ShoppingListItemDto>?,
     )
 
     private companion object {

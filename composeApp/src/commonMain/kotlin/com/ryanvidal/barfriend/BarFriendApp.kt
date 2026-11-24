@@ -52,6 +52,7 @@ fun BarFriendApp(appGraph: AppGraph) {
                 key(session.serverUrl, session.activeBarId) {
                     MainShell(
                         appGraph = appGraph,
+                        serverUrl = session.serverUrl,
                         activeBarId = session.activeBarId,
                     )
                 }

@@ -4,6 +4,7 @@ import coil3.ImageLoader
 import com.ryanvidal.barfriend.core.data.AppPreferences
 import com.ryanvidal.barfriend.core.data.AuthRepository
 import com.ryanvidal.barfriend.core.data.CocktailRepository
+import com.ryanvidal.barfriend.core.data.InventoryRepository
 import com.ryanvidal.barfriend.core.data.SessionRepository
 import com.ryanvidal.barfriend.core.database.BarFriendDatabase
 import com.ryanvidal.barfriend.core.network.BarAssistantApi
@@ -21,6 +22,7 @@ interface AppGraph {
     val appPreferences: AppPreferences
     val authRepository: AuthRepository
     val cocktailRepository: CocktailRepository
+    val inventoryRepository: InventoryRepository
     val barAssistantApi: BarAssistantApi
     val imageHttpClient: ImageHttpClient
     val imageLoader: ImageLoader

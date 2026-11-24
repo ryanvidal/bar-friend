@@ -19,14 +19,31 @@ interface InventoryDao {
     @Query("SELECT ingredientId FROM bar_shelf WHERE barId = :barId")
     fun observeBarShelfIngredientIds(barId: Int): Flow<List<Int>>
 
+    @Query("SELECT ingredientId FROM bar_shelf WHERE barId = :barId")
+    suspend fun getBarShelfIngredientIds(barId: Int): List<Int>
+
     @Query("SELECT * FROM shopping_list WHERE barId = :barId")
     fun observeShoppingList(barId: Int): Flow<List<ShoppingListEntity>>
+
+    @Query("SELECT * FROM shopping_list WHERE barId = :barId")
+    suspend fun getShoppingListSnapshot(barId: Int): List<ShoppingListEntity>
 
     @Upsert
     suspend fun upsertBarShelfItems(items: List<BarShelfEntity>)
 
     @Query("DELETE FROM bar_shelf WHERE barId = :barId AND ingredientId = :ingredientId")
     suspend fun deleteBarShelfItem(barId: Int, ingredientId: Int)
+
+    @Query("DELETE FROM bar_shelf WHERE barId = :barId AND ingredientId IN (:ingredientIds)")
+    suspend fun deleteBarShelfItemsChunk(barId: Int, ingredientIds: List<Int>)
+
+    @Transaction
+    suspend fun deleteBarShelfItems(barId: Int, ingredientIds: List<Int>) {
+        if (ingredientIds.isEmpty()) return
+        ingredientIds.distinct().chunked(900).forEach { chunk ->
+            deleteBarShelfItemsChunk(barId, chunk)
+        }
+    }
 
     @Query("DELETE FROM bar_shelf WHERE barId = :barId")
     suspend fun clearBarShelf(barId: Int)
@@ -45,6 +62,17 @@ interface InventoryDao {
     @Query("DELETE FROM shopping_list WHERE barId = :barId AND ingredientId = :ingredientId")
     suspend fun deleteShoppingListItem(barId: Int, ingredientId: Int)
 
+    @Query("DELETE FROM shopping_list WHERE barId = :barId AND ingredientId IN (:ingredientIds)")
+    suspend fun deleteShoppingListItemsChunk(barId: Int, ingredientIds: List<Int>)
+
+    @Transaction
+    suspend fun deleteShoppingListItems(barId: Int, ingredientIds: List<Int>) {
+        if (ingredientIds.isEmpty()) return
+        ingredientIds.distinct().chunked(900).forEach { chunk ->
+            deleteShoppingListItemsChunk(barId, chunk)
+        }
+    }
+
     @Query("DELETE FROM shopping_list WHERE barId = :barId")
     suspend fun clearShoppingList(barId: Int)
 
@@ -61,6 +89,9 @@ interface InventoryDao {
 interface CatalogDao {
     @Query("SELECT * FROM ingredients WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
     fun observeIngredients(barId: Int): Flow<List<IngredientEntity>>
+
+    @Query("SELECT * FROM ingredients WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
+    suspend fun getIngredientsForBar(barId: Int): List<IngredientEntity>
 
     @Query("SELECT * FROM glasses WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
     fun observeGlasses(barId: Int): Flow<List<GlassEntity>>

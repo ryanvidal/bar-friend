@@ -10,9 +10,28 @@ import com.ryanvidal.barfriend.core.database.entity.CocktailIngredientEntity
 import com.ryanvidal.barfriend.core.database.entity.CocktailMethodEntity
 import com.ryanvidal.barfriend.core.database.entity.GlassEntity
 import com.ryanvidal.barfriend.core.database.entity.IngredientEntity
+import com.ryanvidal.barfriend.core.database.entity.ShoppingListEntity
 import com.ryanvidal.barfriend.core.database.entity.SyncMetadataEntity
 import com.ryanvidal.barfriend.core.database.entity.TagEntity
 import com.ryanvidal.barfriend.core.database.entity.UtensilEntity
+
+data class CocktailAvailabilityUpdate(
+    val cocktailId: Int,
+    val inBarShelf: Boolean,
+    val missingIngredientsCount: Int,
+    val missingIngredientNamesJson: String,
+)
+
+data class CocktailIngredientAvailabilityUpdate(
+    val cocktailId: Int,
+    val ingredientId: Int,
+    val sort: Int,
+    val inBarShelf: Boolean,
+    val inBarShelfAsSubstitute: Boolean,
+    val inBarShelfAsVariant: Boolean,
+    val inBarShelfAsComplex: Boolean,
+    val substitutesJson: String,
+)
 
 @Dao
 interface SyncDao {
@@ -37,6 +56,9 @@ interface SyncDao {
     @Query("DELETE FROM bar_shelf WHERE barId = :barId")
     suspend fun deleteBarShelfForBar(barId: Int)
 
+    @Query("DELETE FROM shopping_list WHERE barId = :barId")
+    suspend fun deleteShoppingListForBar(barId: Int)
+
     @Upsert
     suspend fun upsertCocktails(cocktails: List<CocktailEntity>)
 
@@ -60,6 +82,9 @@ interface SyncDao {
 
     @Upsert
     suspend fun upsertBarShelfItems(items: List<BarShelfEntity>)
+
+    @Upsert
+    suspend fun upsertShoppingListItems(items: List<ShoppingListEntity>)
 
     @Upsert
     suspend fun upsertSyncMetadata(metadata: SyncMetadataEntity)
@@ -107,6 +132,7 @@ interface SyncDao {
         shelfIngredientIds: List<Int>,
         syncKey: String,
         syncedAtEpochMillis: Long,
+        shoppingListItems: List<ShoppingListEntity>? = null,
     ) {
         deleteCocktailsForBar(barId)
         deleteIngredientsForBar(barId)
@@ -141,12 +167,109 @@ interface SyncDao {
         if (distinctShelf.isNotEmpty()) {
             upsertBarShelfItems(distinctShelf.map { BarShelfEntity(barId = barId, ingredientId = it) })
         }
+        if (shoppingListItems != null) {
+            deleteShoppingListForBar(barId)
+            val distinctShopping = shoppingListItems.distinctBy { it.ingredientId }
+            if (distinctShopping.isNotEmpty()) {
+                upsertShoppingListItems(distinctShopping)
+            }
+        }
         upsertSyncMetadata(
             SyncMetadataEntity(
                 key = syncKey,
                 lastSyncedEpochMillis = syncedAtEpochMillis,
             ),
         )
+    }
+
+    @Query("DELETE FROM bar_shelf WHERE barId = :barId AND ingredientId IN (:ingredientIds)")
+    suspend fun deleteBarShelfItemsChunk(barId: Int, ingredientIds: List<Int>)
+
+    @Query(
+        """
+        UPDATE cocktails
+        SET inBarShelf = :inBarShelf,
+            missingIngredientsCount = :missingIngredientsCount,
+            missingIngredientNamesJson = :missingIngredientNamesJson
+        WHERE barId = :barId AND id = :cocktailId
+        """,
+    )
+    suspend fun updateCocktailAvailability(
+        barId: Int,
+        cocktailId: Int,
+        inBarShelf: Boolean,
+        missingIngredientsCount: Int,
+        missingIngredientNamesJson: String,
+    )
+
+    @Query(
+        """
+        UPDATE cocktail_ingredients
+        SET inBarShelf = :inBarShelf,
+            inBarShelfAsSubstitute = :inBarShelfAsSubstitute,
+            inBarShelfAsVariant = :inBarShelfAsVariant,
+            inBarShelfAsComplex = :inBarShelfAsComplex,
+            substitutesJson = :substitutesJson
+        WHERE cocktailId = :cocktailId AND ingredientId = :ingredientId AND sort = :sort
+        """,
+    )
+    suspend fun updateCocktailIngredientAvailability(
+        cocktailId: Int,
+        ingredientId: Int,
+        sort: Int,
+        inBarShelf: Boolean,
+        inBarShelfAsSubstitute: Boolean,
+        inBarShelfAsVariant: Boolean,
+        inBarShelfAsComplex: Boolean,
+        substitutesJson: String,
+    )
+
+    @Transaction
+    suspend fun applyBarShelfAndAvailability(
+        barId: Int,
+        replaceAllShelfIds: List<Int>? = null,
+        addShelfIds: List<Int> = emptyList(),
+        removeShelfIds: List<Int> = emptyList(),
+        cocktailUpdates: List<CocktailAvailabilityUpdate>,
+        ingredientUpdates: List<CocktailIngredientAvailabilityUpdate>,
+    ) {
+        if (replaceAllShelfIds != null) {
+            deleteBarShelfForBar(barId)
+            val distinctShelf = replaceAllShelfIds.distinct()
+            if (distinctShelf.isNotEmpty()) {
+                upsertBarShelfItems(distinctShelf.map { BarShelfEntity(barId = barId, ingredientId = it) })
+            }
+        } else {
+            if (addShelfIds.isNotEmpty()) {
+                upsertBarShelfItems(addShelfIds.distinct().map { BarShelfEntity(barId = barId, ingredientId = it) })
+            }
+            if (removeShelfIds.isNotEmpty()) {
+                removeShelfIds.distinct().chunked(900).forEach { chunk ->
+                    deleteBarShelfItemsChunk(barId, chunk)
+                }
+            }
+        }
+        ingredientUpdates.forEach { update ->
+            updateCocktailIngredientAvailability(
+                cocktailId = update.cocktailId,
+                ingredientId = update.ingredientId,
+                sort = update.sort,
+                inBarShelf = update.inBarShelf,
+                inBarShelfAsSubstitute = update.inBarShelfAsSubstitute,
+                inBarShelfAsVariant = update.inBarShelfAsVariant,
+                inBarShelfAsComplex = update.inBarShelfAsComplex,
+                substitutesJson = update.substitutesJson,
+            )
+        }
+        cocktailUpdates.forEach { update ->
+            updateCocktailAvailability(
+                barId = barId,
+                cocktailId = update.cocktailId,
+                inBarShelf = update.inBarShelf,
+                missingIngredientsCount = update.missingIngredientsCount,
+                missingIngredientNamesJson = update.missingIngredientNamesJson,
+            )
+        }
     }
 
     @Transaction

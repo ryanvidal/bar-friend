@@ -24,6 +24,7 @@ interface CocktailRepository {
     fun observeCatalog(): Flow<BarCatalog>
 
     suspend fun syncAll(force: Boolean = false): Result<Unit>
+    suspend fun syncAllSilent(force: Boolean = false): Result<Unit> = syncAll(force = force)
     suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail>
     suspend fun toggleFavorite(cocktailId: Int): Result<Boolean>
     suspend fun saveCocktail(cocktailId: Int?, request: CocktailUpsertRequest): Result<CocktailDetail>
