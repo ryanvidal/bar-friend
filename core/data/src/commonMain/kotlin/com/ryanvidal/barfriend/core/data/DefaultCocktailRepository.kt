@@ -15,6 +15,7 @@ import com.ryanvidal.barfriend.core.model.Glass
 import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.UploadedImage
 import com.ryanvidal.barfriend.core.network.BarAssistantApi
+import com.ryanvidal.barfriend.core.network.BarAssistantApiException
 import com.ryanvidal.barfriend.core.network.dto.CocktailDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailMethodDto
 import com.ryanvidal.barfriend.core.network.dto.GlassDto
@@ -64,11 +65,11 @@ class DefaultCocktailRepository(
     private val inventoryDao: InventoryDao,
     private val catalogDao: CatalogDao,
     private val syncDao: SyncDao,
+    private val mutationCoordinator: BarMutationCoordinator,
 ) : CocktailRepository {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val syncMutex = Mutex()
-    private val mutationMutex = Mutex()
     private val favoriteMutexMapLock = Mutex()
     private val favoriteMutexes = mutableMapOf<Int, Mutex>()
     private val _syncStatus = MutableStateFlow(SyncStatus())
@@ -78,7 +79,6 @@ class DefaultCocktailRepository(
 
     @Volatile
     private var lastSyncedSession: Pair<String, Int>? = null
-    private var mutationGeneration: Long = 0L
 
     init {
         repositoryScope.launch {
@@ -185,15 +185,21 @@ class DefaultCocktailRepository(
             }
         }
 
-    override suspend fun syncAll(force: Boolean): Result<Unit> = syncMutex.withLock {
+    override suspend fun syncAll(force: Boolean): Result<Unit> = syncInternal(force = force, silent = false)
+
+    override suspend fun syncAllSilent(force: Boolean): Result<Unit> = syncInternal(force = force, silent = true)
+
+    private suspend fun syncInternal(force: Boolean, silent: Boolean): Result<Unit> = syncMutex.withLock {
         val barId = currentActiveBarId()
         val serverUrl = currentServerUrl()
         if (barId == null || serverUrl.isNullOrBlank()) {
-            _syncStatus.value = SyncStatus(
-                isSyncing = false,
-                lastSyncedEpochMillis = null,
-                errorMessage = "No active bar selected.",
-            )
+            if (!silent) {
+                _syncStatus.value = SyncStatus(
+                    isSyncing = false,
+                    lastSyncedEpochMillis = null,
+                    errorMessage = "No active bar selected.",
+                )
+            }
             return@withLock Result.failure(IllegalStateException("No active bar selected."))
         }
 
@@ -205,14 +211,16 @@ class DefaultCocktailRepository(
         val previousTimestamp = _syncStatus.value.lastSyncedEpochMillis
             ?: catalogDao.getSyncTimestamp(syncKey(barId))
         try {
-            _syncStatus.value = SyncStatus(
-                isSyncing = true,
-                lastSyncedEpochMillis = previousTimestamp,
-                errorMessage = null,
-            )
+            if (!silent) {
+                _syncStatus.value = SyncStatus(
+                    isSyncing = true,
+                    lastSyncedEpochMillis = previousTimestamp,
+                    errorMessage = null,
+                )
+            }
 
             for (attempt in 1..MAX_SYNC_ATTEMPTS) {
-                val startGen = mutationMutex.withLock { mutationGeneration }
+                val startGen = mutationCoordinator.withMutationLock { mutationCoordinator.currentGenerationLocked() }
                 val payload = fetchSyncPayload(barId)
 
                 if (!isSessionStillActive(serverUrl, barId)) {
@@ -241,8 +249,10 @@ class DefaultCocktailRepository(
                     ?.distinctBy { it.ingredient.id }
                     ?.map { it.toEntity(barId) }
 
-                val wroteSnapshot = mutationMutex.withLock {
-                    if (!isSessionStillActive(serverUrl, barId) || mutationGeneration != startGen) {
+                val wroteSnapshot = mutationCoordinator.withMutationLock {
+                    if (!isSessionStillActive(serverUrl, barId) ||
+                        mutationCoordinator.currentGenerationLocked() != startGen
+                    ) {
                         false
                     } else {
                         val now = Clock.System.now().toEpochMilliseconds()
@@ -281,14 +291,16 @@ class DefaultCocktailRepository(
                 }
             }
 
-            _syncStatus.value = SyncStatus(
-                isSyncing = false,
-                lastSyncedEpochMillis = previousTimestamp,
-                errorMessage = null,
-            )
+            if (!silent) {
+                _syncStatus.value = SyncStatus(
+                    isSyncing = false,
+                    lastSyncedEpochMillis = previousTimestamp,
+                    errorMessage = null,
+                )
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
-            if (isSessionStillActive(serverUrl, barId)) {
+            if (!silent && isSessionStillActive(serverUrl, barId)) {
                 _syncStatus.value = SyncStatus(
                     isSyncing = false,
                     lastSyncedEpochMillis = previousTimestamp,
@@ -299,7 +311,7 @@ class DefaultCocktailRepository(
             }
             throw e
         } catch (e: Throwable) {
-            if (isSessionStillActive(serverUrl, barId)) {
+            if (!silent && isSessionStillActive(serverUrl, barId)) {
                 _syncStatus.value = SyncStatus(
                     isSyncing = false,
                     lastSyncedEpochMillis = previousTimestamp,
@@ -314,8 +326,8 @@ class DefaultCocktailRepository(
         val barId = requireActiveBarId()
         val serverUrl = currentServerUrl()
         val dto = api.getCocktail(cocktailId.toString())
-        mutationMutex.withLock {
-            mutationGeneration += 1
+        mutationCoordinator.withMutationLock {
+            mutationCoordinator.bumpGenerationLocked()
             if (currentActiveBarId() != barId) {
                 throw IllegalStateException("Active bar changed during cocktail refresh.")
             }
@@ -330,21 +342,21 @@ class DefaultCocktailRepository(
             val existing = cocktailDao.observeCocktailWithIngredients(barId, cocktailId).first()
                 ?: return@withLock runApiCall {
                     val actual = api.toggleFavorite(cocktailId)
-                    mutationMutex.withLock { mutationGeneration += 1 }
+                    mutationCoordinator.withMutationLock { mutationCoordinator.bumpGenerationLocked() }
                     actual
                 }
 
             val previous = existing.cocktail.isFavorite
             val optimistic = !previous
-            mutationMutex.withLock {
-                mutationGeneration += 1
+            mutationCoordinator.withMutationLock {
+                mutationCoordinator.bumpGenerationLocked()
                 cocktailDao.updateFavorite(barId, cocktailId, optimistic)
             }
 
             try {
                 val actual = api.toggleFavorite(cocktailId)
-                mutationMutex.withLock {
-                    mutationGeneration += 1
+                mutationCoordinator.withMutationLock {
+                    mutationCoordinator.bumpGenerationLocked()
                     if (currentActiveBarId() == barId && actual != optimistic) {
                         cocktailDao.updateFavorite(barId, cocktailId, actual)
                     }
@@ -352,8 +364,8 @@ class DefaultCocktailRepository(
                 Result.success(actual)
             } catch (e: CancellationException) {
                 withContext(NonCancellable) {
-                    mutationMutex.withLock {
-                        mutationGeneration += 1
+                    mutationCoordinator.withMutationLock {
+                        mutationCoordinator.bumpGenerationLocked()
                         if (currentActiveBarId() == barId) {
                             cocktailDao.updateFavorite(barId, cocktailId, previous)
                         }
@@ -361,8 +373,8 @@ class DefaultCocktailRepository(
                 }
                 throw e
             } catch (e: Throwable) {
-                mutationMutex.withLock {
-                    mutationGeneration += 1
+                mutationCoordinator.withMutationLock {
+                    mutationCoordinator.bumpGenerationLocked()
                     if (currentActiveBarId() == barId) {
                         cocktailDao.updateFavorite(barId, cocktailId, previous)
                     }
@@ -383,8 +395,8 @@ class DefaultCocktailRepository(
         } else {
             api.updateCocktail(cocktailId, writeDto)
         }
-        mutationMutex.withLock {
-            mutationGeneration += 1
+        mutationCoordinator.withMutationLock {
+            mutationCoordinator.bumpGenerationLocked()
             if (currentActiveBarId() != barId) {
                 throw IllegalStateException("Active bar changed while saving cocktail.")
             }
@@ -398,8 +410,8 @@ class DefaultCocktailRepository(
     override suspend fun deleteCocktail(cocktailId: Int): Result<Unit> = runApiCall {
         val barId = requireActiveBarId()
         api.deleteCocktail(cocktailId)
-        mutationMutex.withLock {
-            mutationGeneration += 1
+        mutationCoordinator.withMutationLock {
+            mutationCoordinator.bumpGenerationLocked()
             if (currentActiveBarId() == barId) {
                 cocktailDao.deleteCocktailById(barId, cocktailId)
             }
@@ -487,9 +499,18 @@ class DefaultCocktailRepository(
         }
         val shoppingListDeferred = async {
             runCatching {
+                val token = sessionRepository.currentToken()
                 val userId = sessionRepository.currentUserId()
-                    ?: api.getProfile().id.also { sessionRepository.setActiveUserId(it) }
-                api.getShoppingList(userId)
+                    ?: api.getProfile().id.also { sessionRepository.setActiveUserId(it, expectedToken = token) }
+                try {
+                    api.getShoppingList(barId = barId, userId = userId)
+                } catch (e: BarAssistantApiException) {
+                    if (e.statusCode != 403) throw e
+                    sessionRepository.setActiveUserId(null, expectedToken = token)
+                    val refreshedUserId = api.getProfile().id
+                    sessionRepository.setActiveUserId(refreshedUserId, expectedToken = token)
+                    api.getShoppingList(barId = barId, userId = refreshedUserId)
+                }
             }.onFailure { if (it is CancellationException) throw it }
                 .getOrNull()
         }

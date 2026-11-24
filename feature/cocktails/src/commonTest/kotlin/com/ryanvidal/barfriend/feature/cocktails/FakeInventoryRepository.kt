@@ -5,6 +5,8 @@ import com.ryanvidal.barfriend.core.model.IngredientSummary
 import com.ryanvidal.barfriend.core.model.RecommendedIngredient
 import com.ryanvidal.barfriend.core.model.ShoppingListItem
 import com.ryanvidal.barfriend.core.model.UnlockedCocktail
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
@@ -37,6 +39,7 @@ internal class FakeInventoryRepository(
     var removeFromShoppingListFailure: Throwable? = null
     var removeFromShoppingListSuspendHook: (suspend (List<Int>) -> Unit)? = null
     var markPurchasedFailure: Throwable? = null
+    var delayShoppingIdsEmission: CompletableDeferred<Unit>? = null
 
     var syncShoppingListCalls = 0
     val setInBarShelfCalls = mutableListOf<SetInBarShelfCall>()
@@ -54,7 +57,10 @@ internal class FakeInventoryRepository(
     override fun observeShoppingList(): Flow<List<ShoppingListItem>> = shoppingListFlow
 
     override fun observeShoppingListIds(): Flow<Set<Int>> =
-        shoppingListFlow.map { items -> items.mapTo(HashSet()) { it.ingredientId } }
+        shoppingListFlow.map { items ->
+            delayShoppingIdsEmission?.await()
+            items.mapTo(HashSet()) { it.ingredientId }
+        }
 
     override suspend fun syncShoppingList(): Result<Unit> {
         syncShoppingListCalls += 1
@@ -75,19 +81,35 @@ internal class FakeInventoryRepository(
     }
 
     override suspend fun addToShoppingList(ingredientIds: List<Int>, quantity: Int): Result<Unit> {
-        addToShoppingListCalls += AddToShoppingListCall(ingredientIds, quantity)
-        addToShoppingListSuspendHook?.invoke(ingredientIds, quantity)
-        addToShoppingListFailure?.let { return Result.failure(it) }
+        val ids = ingredientIds.filter { it > 0 }.distinct()
+        if (ids.isEmpty()) return Result.success(Unit)
+        addToShoppingListCalls += AddToShoppingListCall(ids, quantity)
+        val targetSet = ids.toHashSet()
         val resolvedQuantity = quantity.coerceAtLeast(1)
+        val previousForTargets = shoppingListFlow.value
+            .filter { it.ingredientId in targetSet }
+            .associateBy { it.ingredientId }
         shoppingListFlow.update { current ->
             val existingIds = current.mapTo(HashSet()) { it.ingredientId }
-            val additions = ingredientIds
-                .distinct()
+            val additions = ids
                 .filterNot { it in existingIds }
                 .map { id -> placeholderShoppingListItem(id, resolvedQuantity) }
             current + additions
         }
-        return Result.success(Unit)
+        try {
+            addToShoppingListSuspendHook?.invoke(ids, quantity)
+            addToShoppingListFailure?.let { failure ->
+                rollbackShoppingList(targetSet, previousForTargets)
+                return Result.failure(failure)
+            }
+            return Result.success(Unit)
+        } catch (e: CancellationException) {
+            rollbackShoppingList(targetSet, previousForTargets)
+            throw e
+        } catch (e: Throwable) {
+            rollbackShoppingList(targetSet, previousForTargets)
+            return Result.failure(e)
+        }
     }
 
     override suspend fun updateShoppingListQuantity(ingredientId: Int, quantity: Int): Result<Unit> {
@@ -106,14 +128,30 @@ internal class FakeInventoryRepository(
     }
 
     override suspend fun removeFromShoppingList(ingredientIds: List<Int>): Result<Unit> {
-        removeFromShoppingListCalls += ingredientIds
-        removeFromShoppingListSuspendHook?.invoke(ingredientIds)
-        removeFromShoppingListFailure?.let { return Result.failure(it) }
-        val toRemove = ingredientIds.toHashSet()
+        val ids = ingredientIds.filter { it > 0 }.distinct()
+        if (ids.isEmpty()) return Result.success(Unit)
+        removeFromShoppingListCalls += ids
+        val targetSet = ids.toHashSet()
+        val previousForTargets = shoppingListFlow.value
+            .filter { it.ingredientId in targetSet }
+            .associateBy { it.ingredientId }
         shoppingListFlow.update { current ->
-            current.filterNot { it.ingredientId in toRemove }
+            current.filterNot { it.ingredientId in targetSet }
         }
-        return Result.success(Unit)
+        try {
+            removeFromShoppingListSuspendHook?.invoke(ids)
+            removeFromShoppingListFailure?.let { failure ->
+                rollbackShoppingList(targetSet, previousForTargets)
+                return Result.failure(failure)
+            }
+            return Result.success(Unit)
+        } catch (e: CancellationException) {
+            rollbackShoppingList(targetSet, previousForTargets)
+            throw e
+        } catch (e: Throwable) {
+            rollbackShoppingList(targetSet, previousForTargets)
+            return Result.failure(e)
+        }
     }
 
     override suspend fun markPurchasedToBarShelf(ingredientIds: List<Int>): Result<Unit> {
@@ -136,6 +174,19 @@ internal class FakeInventoryRepository(
 
     override suspend fun getUnlockedCocktails(ingredientId: Int): Result<List<UnlockedCocktail>> =
         Result.success(emptyList())
+
+    private fun rollbackShoppingList(
+        targetSet: Set<Int>,
+        previousForTargets: Map<Int, ShoppingListItem>,
+    ) {
+        shoppingListFlow.update { current ->
+            val withoutTargets = current.filterNot { it.ingredientId in targetSet }
+            val restored = previousForTargets.values.filter { prev ->
+                withoutTargets.none { it.ingredientId == prev.ingredientId }
+            }
+            withoutTargets + restored
+        }
+    }
 
     private fun placeholderShoppingListItem(ingredientId: Int, quantity: Int = 1): ShoppingListItem =
         ShoppingListItem(

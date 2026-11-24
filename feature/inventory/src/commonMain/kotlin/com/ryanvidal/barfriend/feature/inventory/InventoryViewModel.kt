@@ -12,19 +12,20 @@ import com.ryanvidal.barfriend.core.model.UnlockedCocktail
 import dev.zacsweers.metro.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+private const val QUANTITY_DEBOUNCE_MILLIS = 250L
 
 enum class InventoryTab(val label: String) {
     BAR_SHELF("Bar Shelf"),
@@ -36,6 +37,11 @@ enum class ShelfStockFilter(val label: String) {
     IN_STOCK("In Stock"),
     OUT_OF_STOCK("Out of Stock"),
 }
+
+data class InventorySnackbarEvent(
+    val id: Long,
+    val message: String,
+)
 
 data class UnlockedCocktailsSheetState(
     val ingredientId: Int,
@@ -65,11 +71,23 @@ data class InventoryUiState(
     val inFlightShelfIds: Set<Int> = emptySet(),
     val inFlightShoppingIds: Set<Int> = emptySet(),
     val inFlightPurchaseIds: Set<Int> = emptySet(),
+    val pendingQuantityIds: Set<Int> = emptySet(),
+    val inFlightQuantityIds: Set<Int> = emptySet(),
     val isBulkUpdating: Boolean = false,
     val isRefreshing: Boolean = false,
     val syncStatus: SyncStatus = SyncStatus(),
-    val snackbarMessage: String? = null,
-)
+    val snackbarEvent: InventorySnackbarEvent? = null,
+) {
+    val snackbarMessage: String?
+        get() = snackbarEvent?.message
+
+    val hasInFlightItemMutations: Boolean
+        get() = inFlightShelfIds.isNotEmpty() ||
+            inFlightShoppingIds.isNotEmpty() ||
+            inFlightPurchaseIds.isNotEmpty() ||
+            pendingQuantityIds.isNotEmpty() ||
+            inFlightQuantityIds.isNotEmpty()
+}
 
 private data class UnlockedSheetDraft(
     val ingredientId: Int,
@@ -91,12 +109,29 @@ private data class InventoryInteractionState(
     val inFlightShelfIds: Set<Int> = emptySet(),
     val inFlightShoppingIds: Set<Int> = emptySet(),
     val inFlightPurchaseIds: Set<Int> = emptySet(),
+    val pendingQuantityIds: Set<Int> = emptySet(),
+    val inFlightQuantityIds: Set<Int> = emptySet(),
     val optimisticShelfStates: Map<Int, Boolean> = emptyMap(),
     val optimisticShoppingStates: Map<Int, Boolean> = emptyMap(),
+    val optimisticQuantities: Map<Int, Int> = emptyMap(),
+    val roomShelfIds: Set<Int> = emptySet(),
+    val roomCatalogShoppingIds: Set<Int> = emptySet(),
+    val roomCatalogNames: Map<Int, String> = emptyMap(),
+    val roomShoppingMap: Map<Int, Int> = emptyMap(),
+    val roomShoppingNames: Map<Int, String> = emptyMap(),
+    val hasReceivedShoppingList: Boolean = false,
     val isBulkUpdating: Boolean = false,
     val isRefreshing: Boolean = false,
-    val snackbarMessage: String? = null,
-)
+    val lastSnackbarId: Long = 0L,
+    val snackbarEvent: InventorySnackbarEvent? = null,
+) {
+    val hasInFlightItemMutations: Boolean
+        get() = inFlightShelfIds.isNotEmpty() ||
+            inFlightShoppingIds.isNotEmpty() ||
+            inFlightPurchaseIds.isNotEmpty() ||
+            pendingQuantityIds.isNotEmpty() ||
+            inFlightQuantityIds.isNotEmpty()
+}
 
 private data class InventoryDataSnapshot(
     val catalogIngredients: List<IngredientSummary> = emptyList(),
@@ -115,23 +150,42 @@ class InventoryViewModel(
 
     private var recommendationsJob: Job? = null
     private var recommendationsGeneration: Long = 0L
+    private var hasLoadedInitialRecommendations: Boolean = false
     private var unlockedCocktailsJob: Job? = null
     private var unlockedSheetRequestId: Long = 0L
+    private val quantityUpdateJobs = mutableMapOf<Int, Job>()
+    private val quantityGenerations = mutableMapOf<Int, Long>()
 
-    private val barShelfIdsFlow: Flow<Set<Int>> = inventoryRepository
+    private val barShelfIngredientsFlow: SharedFlow<List<IngredientSummary>> = inventoryRepository
         .observeBarShelfIngredients()
-        .map { items -> items.filter { it.inBarShelf }.mapTo(HashSet(items.size)) { it.id } }
-        .distinctUntilChanged()
+        .shareIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            replay = 1,
+        )
+
+    private val shoppingListFlow: SharedFlow<List<ShoppingListItem>> = inventoryRepository
+        .observeShoppingList()
+        .shareIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            replay = 1,
+        )
 
     private val dataFlow: Flow<InventoryDataSnapshot> = combine(
-        cocktailRepository.observeCatalog(),
-        barShelfIdsFlow,
-        inventoryRepository.observeShoppingList(),
-        inventoryRepository.observeShoppingListIds(),
+        barShelfIngredientsFlow,
+        shoppingListFlow,
         cocktailRepository.syncStatus,
-    ) { catalog, barShelfIds, shoppingList, shoppingListIds, syncStatus ->
+    ) { catalogIngredients, shoppingList, syncStatus ->
+        val barShelfIds = catalogIngredients.asSequence()
+            .filter { it.inBarShelf }
+            .mapTo(HashSet(catalogIngredients.size)) { it.id }
+        val shoppingListIds = HashSet<Int>(shoppingList.size + catalogIngredients.size).apply {
+            shoppingList.forEach { add(it.ingredientId) }
+            catalogIngredients.forEach { if (it.inShoppingList) add(it.id) }
+        }
         InventoryDataSnapshot(
-            catalogIngredients = catalog.ingredients,
+            catalogIngredients = catalogIngredients,
             barShelfIds = barShelfIds,
             shoppingList = shoppingList,
             shoppingListIds = shoppingListIds,
@@ -141,13 +195,92 @@ class InventoryViewModel(
 
     init {
         viewModelScope.launch {
-            cocktailRepository.observeCatalog().collect { catalog ->
-                pruneStaleCategory(catalog.ingredients)
+            barShelfIngredientsFlow.collect { ingredients ->
+                val roomShelfIds = ingredients.asSequence()
+                    .filter { it.inBarShelf }
+                    .mapTo(HashSet(ingredients.size)) { it.id }
+                val roomCatalogShoppingIds = ingredients.asSequence()
+                    .filter { it.inShoppingList }
+                    .mapTo(HashSet(ingredients.size)) { it.id }
+                val roomCatalogNames = ingredients.associate { it.id to it.name }
+                val validCategories = ingredients.mapNotNullTo(HashSet()) {
+                    it.categoryName?.trim()?.takeIf { name -> name.isNotEmpty() }
+                }
+
+                interaction.update { current ->
+                    val selected = current.selectedCategory
+                    val prunedCategory = if (selected != null && selected !in validCategories) null else selected
+                    current.copy(
+                        selectedCategory = prunedCategory,
+                        roomShelfIds = roomShelfIds,
+                        roomCatalogShoppingIds = roomCatalogShoppingIds,
+                        roomCatalogNames = roomCatalogNames,
+                        optimisticShelfStates = current.optimisticShelfStates.filterNot { (id, target) ->
+                            id !in current.inFlightShelfIds &&
+                                id !in current.inFlightPurchaseIds &&
+                                (id in roomShelfIds) == target
+                        },
+                        optimisticShoppingStates = current.optimisticShoppingStates.filterNot { (id, target) ->
+                            isShoppingOverrideConverged(
+                                ingredientId = id,
+                                target = target,
+                                inFlightShoppingIds = current.inFlightShoppingIds,
+                                inFlightPurchaseIds = current.inFlightPurchaseIds,
+                                roomShoppingMap = current.roomShoppingMap,
+                                roomCatalogShoppingIds = roomCatalogShoppingIds,
+                            )
+                        },
+                    )
+                }
+
+                if (ingredients.isEmpty()) {
+                    if (hasLoadedInitialRecommendations) {
+                        recommendationsJob?.cancel()
+                        interaction.update {
+                            it.copy(
+                                recommendations = emptyList(),
+                                isLoadingRecommendations = false,
+                                recommendationsError = null,
+                            )
+                        }
+                    }
+                    hasLoadedInitialRecommendations = false
+                } else if (!hasLoadedInitialRecommendations) {
+                    hasLoadedInitialRecommendations = true
+                    if (recommendationsJob?.isActive != true) {
+                        launchRecommendationsLoad()
+                    }
+                }
             }
         }
         viewModelScope.launch {
-            barShelfIdsFlow.collect {
-                launchRecommendationsLoad()
+            shoppingListFlow.collect { shoppingList ->
+                val roomShoppingMap = shoppingList.associate { it.ingredientId to it.quantity }
+                val roomShoppingNames = shoppingList.associate { it.ingredientId to it.ingredientName }
+                interaction.update { current ->
+                    val pendingOrInFlightQuantityIds = current.pendingQuantityIds + current.inFlightQuantityIds
+                    current.copy(
+                        hasReceivedShoppingList = true,
+                        roomShoppingMap = roomShoppingMap,
+                        roomShoppingNames = roomShoppingNames,
+                        optimisticShoppingStates = current.optimisticShoppingStates.filterNot { (id, target) ->
+                            isShoppingOverrideConverged(
+                                ingredientId = id,
+                                target = target,
+                                inFlightShoppingIds = current.inFlightShoppingIds,
+                                inFlightPurchaseIds = current.inFlightPurchaseIds,
+                                roomShoppingMap = roomShoppingMap,
+                                roomCatalogShoppingIds = current.roomCatalogShoppingIds,
+                            )
+                        },
+                        optimisticQuantities = current.optimisticQuantities.filterNot { (id, targetQty) ->
+                            id !in pendingOrInFlightQuantityIds && (
+                                roomShoppingMap[id] == targetQty ||
+                                    (id !in roomShoppingMap && targetQty <= 0)
+                                )
+                        },
+                    )
+                }
             }
         }
     }
@@ -193,11 +326,41 @@ class InventoryViewModel(
             matchesStock && matchesCategory && matchesQuery
         }
 
+        val shoppingList = data.shoppingList
+            .filter { item -> local.optimisticShoppingStates[item.ingredientId] != false }
+            .map { item ->
+                val optimisticQty = local.optimisticQuantities[item.ingredientId]
+                if (optimisticQty != null && optimisticQty != item.quantity) {
+                    item.copy(quantity = optimisticQty)
+                } else {
+                    item
+                }
+            }
+
+        val catalogById = if (local.recommendations.isEmpty()) {
+            emptyMap()
+        } else {
+            data.catalogIngredients.associateBy { it.id }
+        }
         val syncedRecommendations = local.recommendations
             .filter { rec -> rec.id !in effectiveShelfIds }
             .map { rec ->
+                val info = catalogById[rec.id]
                 val inShopping = rec.id in effectiveShoppingIds
-                if (rec.inShoppingList == inShopping) rec else rec.copy(inShoppingList = inShopping)
+                val categoryName = rec.categoryName ?: info?.categoryName
+                val thumbUrl = rec.mainImageThumbUrl ?: info?.mainImageThumbUrl
+                if (rec.inShoppingList == inShopping &&
+                    rec.categoryName == categoryName &&
+                    rec.mainImageThumbUrl == thumbUrl
+                ) {
+                    rec
+                } else {
+                    rec.copy(
+                        categoryName = categoryName,
+                        mainImageThumbUrl = thumbUrl,
+                        inShoppingList = inShopping,
+                    )
+                }
             }
 
         val unlockedSheet = local.unlockedSheetDraft?.let { draft ->
@@ -222,7 +385,7 @@ class InventoryViewModel(
             categories = categories,
             inStockCount = allIngredients.count { it.inBarShelf },
             totalIngredientsCount = allIngredients.size,
-            shoppingList = data.shoppingList,
+            shoppingList = shoppingList,
             recommendations = syncedRecommendations,
             isLoadingRecommendations = local.isLoadingRecommendations,
             recommendationsError = local.recommendationsError,
@@ -230,10 +393,12 @@ class InventoryViewModel(
             inFlightShelfIds = local.inFlightShelfIds,
             inFlightShoppingIds = local.inFlightShoppingIds,
             inFlightPurchaseIds = local.inFlightPurchaseIds,
+            pendingQuantityIds = local.pendingQuantityIds,
+            inFlightQuantityIds = local.inFlightQuantityIds,
             isBulkUpdating = local.isBulkUpdating,
-            isRefreshing = local.isRefreshing || data.syncStatus.isSyncing,
+            isRefreshing = local.isRefreshing,
             syncStatus = data.syncStatus,
-            snackbarMessage = local.snackbarMessage,
+            snackbarEvent = local.snackbarEvent,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -277,22 +442,20 @@ class InventoryViewModel(
         }
         viewModelScope.launch {
             try {
-                val (syncResult, shoppingResult) = coroutineScope {
-                    val syncDeferred = async { cocktailRepository.syncAll(force = true) }
-                    val shoppingDeferred = async { inventoryRepository.syncShoppingList() }
-                    syncDeferred.await() to shoppingDeferred.await()
-                }
-                val syncError = syncResult.exceptionOrNull()?.message?.takeIf { it.isNotBlank() }
-                val shoppingError = shoppingResult.exceptionOrNull()?.message?.takeIf { it.isNotBlank() }
-                when {
-                    shoppingResult.isFailure -> interaction.update {
-                        it.copy(snackbarMessage = shoppingError ?: "Unable to sync shopping list.")
+                val syncResult = cocktailRepository.syncAll(force = true)
+                if (syncResult.isSuccess) {
+                    val shoppingResult = inventoryRepository.syncShoppingList()
+                    shoppingResult.onFailure { error ->
+                        val shoppingError = error.message?.takeIf { it.isNotBlank() }
+                        emitSnackbar(shoppingError ?: "Unable to sync shopping list.")
                     }
-                    syncResult.isFailure && cocktailRepository.syncStatus.value.errorMessage == null -> interaction.update {
-                        it.copy(snackbarMessage = syncError ?: "Sync failed.")
+                    launchRecommendationsLoad().join()
+                } else {
+                    val syncError = syncResult.exceptionOrNull()?.message?.takeIf { it.isNotBlank() }
+                    if (cocktailRepository.syncStatus.value.errorMessage == null) {
+                        emitSnackbar(syncError ?: "Sync failed.")
                     }
                 }
-                launchRecommendationsLoad().join()
             } catch (e: CancellationException) {
                 throw e
             } finally {
@@ -323,30 +486,39 @@ class InventoryViewModel(
             }
         }
         viewModelScope.launch {
+            var succeeded = false
             try {
                 inventoryRepository.setInBarShelf(listOf(ingredientId), inStock)
+                    .onSuccess {
+                        succeeded = true
+                        launchRecommendationsLoad()
+                    }
                     .onFailure { error ->
-                        interaction.update {
-                            it.copy(
-                                snackbarMessage = error.message?.takeIf { msg -> msg.isNotBlank() }
-                                    ?: "Unable to update bar shelf.",
-                            )
-                        }
+                        emitSnackbar(
+                            error.message?.takeIf { msg -> msg.isNotBlank() }
+                                ?: "Unable to update bar shelf.",
+                        )
                     }
             } catch (e: CancellationException) {
                 throw e
             } finally {
                 interaction.update { current ->
+                    val remainingShelf = current.inFlightShelfIds - ingredientId
+                    val converged = succeeded && (ingredientId in current.roomShelfIds) == inStock
                     current.copy(
-                        inFlightShelfIds = current.inFlightShelfIds - ingredientId,
-                        optimisticShelfStates = current.optimisticShelfStates - ingredientId,
+                        inFlightShelfIds = remainingShelf,
+                        optimisticShelfStates = if (!succeeded || converged) {
+                            current.optimisticShelfStates - ingredientId
+                        } else {
+                            current.optimisticShelfStates
+                        },
                     )
                 }
             }
         }
     }
 
-    fun toggleShoppingList(ingredientId: Int) {
+    fun toggleShoppingList(ingredientId: Int, inShoppingList: Boolean) {
         while (true) {
             val current = interaction.value
             if (current.isBulkUpdating ||
@@ -355,37 +527,54 @@ class InventoryViewModel(
             ) {
                 return
             }
-            val next = current.copy(inFlightShoppingIds = current.inFlightShoppingIds + ingredientId)
+            val next = current.copy(
+                inFlightShoppingIds = current.inFlightShoppingIds + ingredientId,
+                pendingQuantityIds = current.pendingQuantityIds - ingredientId,
+                inFlightQuantityIds = current.inFlightQuantityIds - ingredientId,
+                optimisticQuantities = current.optimisticQuantities - ingredientId,
+                optimisticShoppingStates = current.optimisticShoppingStates + (ingredientId to inShoppingList),
+            )
             if (interaction.compareAndSet(current, next)) {
                 break
             }
         }
+        cancelQuantityJob(ingredientId)
         viewModelScope.launch {
+            var succeeded = false
             try {
-                val currentlyInList = ingredientId in inventoryRepository.observeShoppingListIds().first()
-                interaction.update {
-                    it.copy(optimisticShoppingStates = it.optimisticShoppingStates + (ingredientId to !currentlyInList))
-                }
-                val result = if (currentlyInList) {
-                    inventoryRepository.removeFromShoppingList(listOf(ingredientId))
-                } else {
+                val result = if (inShoppingList) {
                     inventoryRepository.addToShoppingList(listOf(ingredientId), quantity = 1)
+                } else {
+                    inventoryRepository.removeFromShoppingList(listOf(ingredientId))
                 }
-                result.onFailure { error ->
-                    interaction.update {
-                        it.copy(
-                            snackbarMessage = error.message?.takeIf { msg -> msg.isNotBlank() }
+                result
+                    .onSuccess {
+                        succeeded = true
+                    }
+                    .onFailure { error ->
+                        emitSnackbar(
+                            error.message?.takeIf { msg -> msg.isNotBlank() }
                                 ?: "Unable to update shopping list.",
                         )
                     }
-                }
             } catch (e: CancellationException) {
                 throw e
             } finally {
                 interaction.update { current ->
+                    val remainingShopping = current.inFlightShoppingIds - ingredientId
+                    val converged = succeeded && isShoppingStateConverged(
+                        ingredientId = ingredientId,
+                        target = inShoppingList,
+                        roomShoppingMap = current.roomShoppingMap,
+                        roomCatalogShoppingIds = current.roomCatalogShoppingIds,
+                    )
                     current.copy(
-                        inFlightShoppingIds = current.inFlightShoppingIds - ingredientId,
-                        optimisticShoppingStates = current.optimisticShoppingStates - ingredientId,
+                        inFlightShoppingIds = remainingShopping,
+                        optimisticShoppingStates = if (!succeeded || converged) {
+                            current.optimisticShoppingStates - ingredientId
+                        } else {
+                            current.optimisticShoppingStates
+                        },
                     )
                 }
             }
@@ -403,72 +592,189 @@ class InventoryViewModel(
             }
             val next = current.copy(
                 inFlightShoppingIds = current.inFlightShoppingIds + ingredientId,
+                pendingQuantityIds = current.pendingQuantityIds - ingredientId,
+                inFlightQuantityIds = current.inFlightQuantityIds - ingredientId,
+                optimisticQuantities = current.optimisticQuantities - ingredientId,
                 optimisticShoppingStates = current.optimisticShoppingStates + (ingredientId to true),
             )
             if (interaction.compareAndSet(current, next)) {
                 break
             }
         }
+        cancelQuantityJob(ingredientId)
         viewModelScope.launch {
+            var succeeded = false
             try {
                 inventoryRepository.addToShoppingList(listOf(ingredientId), quantity = 1)
+                    .onSuccess {
+                        succeeded = true
+                    }
                     .onFailure { error ->
-                        interaction.update {
-                            it.copy(
-                                snackbarMessage = error.message?.takeIf { msg -> msg.isNotBlank() }
-                                    ?: "Unable to add to shopping list.",
-                            )
-                        }
+                        emitSnackbar(
+                            error.message?.takeIf { msg -> msg.isNotBlank() }
+                                ?: "Unable to add to shopping list.",
+                        )
                     }
             } catch (e: CancellationException) {
                 throw e
             } finally {
                 interaction.update { current ->
+                    val remainingShopping = current.inFlightShoppingIds - ingredientId
+                    val converged = succeeded && isShoppingStateConverged(
+                        ingredientId = ingredientId,
+                        target = true,
+                        roomShoppingMap = current.roomShoppingMap,
+                        roomCatalogShoppingIds = current.roomCatalogShoppingIds,
+                    )
                     current.copy(
-                        inFlightShoppingIds = current.inFlightShoppingIds - ingredientId,
-                        optimisticShoppingStates = current.optimisticShoppingStates - ingredientId,
+                        inFlightShoppingIds = remainingShopping,
+                        optimisticShoppingStates = if (!succeeded || converged) {
+                            current.optimisticShoppingStates - ingredientId
+                        } else {
+                            current.optimisticShoppingStates
+                        },
                     )
                 }
             }
         }
     }
 
-    fun updateQuantity(ingredientId: Int, quantity: Int) {
+    fun updateQuantity(ingredientId: Int, newQuantity: Int) {
+        if (newQuantity <= 0) {
+            while (true) {
+                val current = interaction.value
+                if (current.isBulkUpdating ||
+                    ingredientId in current.inFlightPurchaseIds ||
+                    ingredientId in current.inFlightShoppingIds
+                ) {
+                    return
+                }
+                val next = current.copy(
+                    inFlightShoppingIds = current.inFlightShoppingIds + ingredientId,
+                    pendingQuantityIds = current.pendingQuantityIds - ingredientId,
+                    inFlightQuantityIds = current.inFlightQuantityIds - ingredientId,
+                    optimisticQuantities = current.optimisticQuantities - ingredientId,
+                    optimisticShoppingStates = current.optimisticShoppingStates + (ingredientId to false),
+                )
+                if (interaction.compareAndSet(current, next)) {
+                    break
+                }
+            }
+            cancelQuantityJob(ingredientId)
+            viewModelScope.launch {
+                var succeeded = false
+                try {
+                    inventoryRepository.removeFromShoppingList(listOf(ingredientId))
+                        .onSuccess {
+                            succeeded = true
+                        }
+                        .onFailure { error ->
+                            emitSnackbar(
+                                error.message?.takeIf { msg -> msg.isNotBlank() }
+                                    ?: "Unable to update quantity.",
+                            )
+                        }
+                } catch (e: CancellationException) {
+                    throw e
+                } finally {
+                    interaction.update { current ->
+                        val remainingShopping = current.inFlightShoppingIds - ingredientId
+                        val converged = succeeded && isShoppingStateConverged(
+                            ingredientId = ingredientId,
+                            target = false,
+                            roomShoppingMap = current.roomShoppingMap,
+                            roomCatalogShoppingIds = current.roomCatalogShoppingIds,
+                        )
+                        current.copy(
+                            inFlightShoppingIds = remainingShopping,
+                            optimisticShoppingStates = if (!succeeded || converged) {
+                                current.optimisticShoppingStates - ingredientId
+                            } else {
+                                current.optimisticShoppingStates
+                            },
+                        )
+                    }
+                }
+            }
+            return
+        }
+
         while (true) {
             val current = interaction.value
             if (current.isBulkUpdating ||
-                ingredientId in current.inFlightShoppingIds ||
-                ingredientId in current.inFlightPurchaseIds
+                ingredientId in current.inFlightPurchaseIds ||
+                ingredientId in current.inFlightShoppingIds
             ) {
                 return
             }
-            val next = current.copy(inFlightShoppingIds = current.inFlightShoppingIds + ingredientId)
+            val next = current.copy(
+                pendingQuantityIds = current.pendingQuantityIds + ingredientId,
+                inFlightQuantityIds = current.inFlightQuantityIds - ingredientId,
+                optimisticQuantities = current.optimisticQuantities + (ingredientId to newQuantity),
+            )
             if (interaction.compareAndSet(current, next)) {
                 break
             }
         }
-        viewModelScope.launch {
+        val generation = cancelQuantityJob(ingredientId)
+        val job = viewModelScope.launch {
+            var succeeded = false
             try {
-                val result = if (quantity <= 0) {
-                    inventoryRepository.removeFromShoppingList(listOf(ingredientId))
-                } else {
-                    inventoryRepository.updateShoppingListQuantity(ingredientId, quantity)
-                }
-                result.onFailure { error ->
-                    interaction.update {
-                        it.copy(
-                            snackbarMessage = error.message?.takeIf { msg -> msg.isNotBlank() }
-                                ?: "Unable to update quantity.",
+                delay(QUANTITY_DEBOUNCE_MILLIS)
+                var shouldExecute = false
+                interaction.update { current ->
+                    if (quantityGenerations[ingredientId] == generation) {
+                        shouldExecute = true
+                        current.copy(
+                            pendingQuantityIds = current.pendingQuantityIds - ingredientId,
+                            inFlightQuantityIds = current.inFlightQuantityIds + ingredientId,
                         )
+                    } else {
+                        shouldExecute = false
+                        current
                     }
                 }
+                if (!shouldExecute) return@launch
+                inventoryRepository.updateShoppingListQuantity(ingredientId, newQuantity)
+                    .onSuccess {
+                        if (quantityGenerations[ingredientId] == generation) {
+                            succeeded = true
+                        }
+                    }
+                    .onFailure { error ->
+                        if (quantityGenerations[ingredientId] == generation) {
+                            emitSnackbar(
+                                error.message?.takeIf { msg -> msg.isNotBlank() }
+                                    ?: "Unable to update quantity.",
+                            )
+                        }
+                    }
             } catch (e: CancellationException) {
                 throw e
             } finally {
-                interaction.update {
-                    it.copy(inFlightShoppingIds = it.inFlightShoppingIds - ingredientId)
+                if (quantityGenerations[ingredientId] == generation) {
+                    quantityUpdateJobs.remove(ingredientId)
+                    interaction.update { current ->
+                        if (quantityGenerations[ingredientId] != generation) {
+                            current
+                        } else {
+                            val converged = succeeded && current.roomShoppingMap[ingredientId] == newQuantity
+                            current.copy(
+                                pendingQuantityIds = current.pendingQuantityIds - ingredientId,
+                                inFlightQuantityIds = current.inFlightQuantityIds - ingredientId,
+                                optimisticQuantities = if (!succeeded || converged) {
+                                    current.optimisticQuantities - ingredientId
+                                } else {
+                                    current.optimisticQuantities
+                                },
+                            )
+                        }
+                    }
                 }
             }
+        }
+        if (job.isActive) {
+            quantityUpdateJobs[ingredientId] = job
         }
     }
 
@@ -483,30 +789,47 @@ class InventoryViewModel(
             }
             val next = current.copy(
                 inFlightShoppingIds = current.inFlightShoppingIds + ingredientId,
+                pendingQuantityIds = current.pendingQuantityIds - ingredientId,
+                inFlightQuantityIds = current.inFlightQuantityIds - ingredientId,
+                optimisticQuantities = current.optimisticQuantities - ingredientId,
                 optimisticShoppingStates = current.optimisticShoppingStates + (ingredientId to false),
             )
             if (interaction.compareAndSet(current, next)) {
                 break
             }
         }
+        cancelQuantityJob(ingredientId)
         viewModelScope.launch {
+            var succeeded = false
             try {
                 inventoryRepository.removeFromShoppingList(listOf(ingredientId))
+                    .onSuccess {
+                        succeeded = true
+                    }
                     .onFailure { error ->
-                        interaction.update {
-                            it.copy(
-                                snackbarMessage = error.message?.takeIf { msg -> msg.isNotBlank() }
-                                    ?: "Unable to remove item.",
-                            )
-                        }
+                        emitSnackbar(
+                            error.message?.takeIf { msg -> msg.isNotBlank() }
+                                ?: "Unable to remove item.",
+                        )
                     }
             } catch (e: CancellationException) {
                 throw e
             } finally {
                 interaction.update { current ->
+                    val remainingShopping = current.inFlightShoppingIds - ingredientId
+                    val converged = succeeded && isShoppingStateConverged(
+                        ingredientId = ingredientId,
+                        target = false,
+                        roomShoppingMap = current.roomShoppingMap,
+                        roomCatalogShoppingIds = current.roomCatalogShoppingIds,
+                    )
                     current.copy(
-                        inFlightShoppingIds = current.inFlightShoppingIds - ingredientId,
-                        optimisticShoppingStates = current.optimisticShoppingStates - ingredientId,
+                        inFlightShoppingIds = remainingShopping,
+                        optimisticShoppingStates = if (!succeeded || converged) {
+                            current.optimisticShoppingStates - ingredientId
+                        } else {
+                            current.optimisticShoppingStates
+                        },
                     )
                 }
             }
@@ -525,6 +848,9 @@ class InventoryViewModel(
             }
             val next = current.copy(
                 inFlightPurchaseIds = current.inFlightPurchaseIds + ingredientId,
+                pendingQuantityIds = current.pendingQuantityIds - ingredientId,
+                inFlightQuantityIds = current.inFlightQuantityIds - ingredientId,
+                optimisticQuantities = current.optimisticQuantities - ingredientId,
                 optimisticShelfStates = current.optimisticShelfStates + (ingredientId to true),
                 optimisticShoppingStates = current.optimisticShoppingStates + (ingredientId to false),
             )
@@ -532,43 +858,55 @@ class InventoryViewModel(
                 break
             }
         }
+        cancelQuantityJob(ingredientId)
         viewModelScope.launch {
+            var succeeded = false
             try {
-                val itemName = inventoryRepository.observeShoppingList().first()
-                    .firstOrNull { it.ingredientId == ingredientId }
-                    ?.ingredientName
-                    ?: cocktailRepository.observeCatalog().first()
-                        .ingredients
-                        .firstOrNull { it.id == ingredientId }
-                        ?.name
+                val snapshot = interaction.value
+                val itemName = snapshot.roomShoppingNames[ingredientId]
+                    ?: snapshot.roomCatalogNames[ingredientId]
                 inventoryRepository.markPurchasedToBarShelf(listOf(ingredientId))
                     .onSuccess {
-                        interaction.update {
-                            it.copy(
-                                snackbarMessage = if (itemName != null) {
-                                    "Moved $itemName to Bar Shelf"
-                                } else {
-                                    "Moved item to Bar Shelf"
-                                },
-                            )
-                        }
+                        succeeded = true
+                        launchRecommendationsLoad()
+                        emitSnackbar(
+                            if (itemName != null) {
+                                "Moved $itemName to Bar Shelf"
+                            } else {
+                                "Moved item to Bar Shelf"
+                            },
+                        )
                     }
                     .onFailure { error ->
-                        interaction.update {
-                            it.copy(
-                                snackbarMessage = error.message?.takeIf { msg -> msg.isNotBlank() }
-                                    ?: "Unable to mark item as purchased.",
-                            )
-                        }
+                        emitSnackbar(
+                            error.message?.takeIf { msg -> msg.isNotBlank() }
+                                ?: "Unable to mark item as purchased.",
+                        )
                     }
             } catch (e: CancellationException) {
                 throw e
             } finally {
                 interaction.update { current ->
+                    val remainingPurchase = current.inFlightPurchaseIds - ingredientId
+                    val shelfConverged = succeeded && (ingredientId in current.roomShelfIds)
+                    val shoppingConverged = succeeded && isShoppingStateConverged(
+                        ingredientId = ingredientId,
+                        target = false,
+                        roomShoppingMap = current.roomShoppingMap,
+                        roomCatalogShoppingIds = current.roomCatalogShoppingIds,
+                    )
                     current.copy(
-                        inFlightPurchaseIds = current.inFlightPurchaseIds - ingredientId,
-                        optimisticShelfStates = current.optimisticShelfStates - ingredientId,
-                        optimisticShoppingStates = current.optimisticShoppingStates - ingredientId,
+                        inFlightPurchaseIds = remainingPurchase,
+                        optimisticShelfStates = if (!succeeded || shelfConverged) {
+                            current.optimisticShelfStates - ingredientId
+                        } else {
+                            current.optimisticShelfStates
+                        },
+                        optimisticShoppingStates = if (!succeeded || shoppingConverged) {
+                            current.optimisticShoppingStates - ingredientId
+                        } else {
+                            current.optimisticShoppingStates
+                        },
                     )
                 }
             }
@@ -578,30 +916,27 @@ class InventoryViewModel(
     fun markAllPurchased() {
         while (true) {
             val current = interaction.value
-            if (current.isBulkUpdating) return
+            if (current.isBulkUpdating || current.hasInFlightItemMutations) return
             if (interaction.compareAndSet(current, current.copy(isBulkUpdating = true))) {
                 break
             }
         }
         viewModelScope.launch {
             try {
-                val ids = inventoryRepository.observeShoppingList().first()
-                    .map { it.ingredientId }
-                    .distinct()
+                val ids = resolveCurrentShoppingIds()
                 if (ids.isEmpty()) return@launch
                 inventoryRepository.markPurchasedToBarShelf(ids)
                     .onSuccess {
-                        interaction.update {
-                            it.copy(snackbarMessage = "Moved all items to Bar Shelf")
-                        }
+                        val idSet = ids.toSet()
+                        interaction.update { it.copy(optimisticQuantities = it.optimisticQuantities - idSet) }
+                        launchRecommendationsLoad()
+                        emitSnackbar("Moved all items to Bar Shelf")
                     }
                     .onFailure { error ->
-                        interaction.update {
-                            it.copy(
-                                snackbarMessage = error.message?.takeIf { msg -> msg.isNotBlank() }
-                                    ?: "Unable to move items to Bar Shelf.",
-                            )
-                        }
+                        emitSnackbar(
+                            error.message?.takeIf { msg -> msg.isNotBlank() }
+                                ?: "Unable to move items to Bar Shelf.",
+                        )
                     }
             } catch (e: CancellationException) {
                 throw e
@@ -614,30 +949,26 @@ class InventoryViewModel(
     fun clearShoppingList() {
         while (true) {
             val current = interaction.value
-            if (current.isBulkUpdating) return
+            if (current.isBulkUpdating || current.hasInFlightItemMutations) return
             if (interaction.compareAndSet(current, current.copy(isBulkUpdating = true))) {
                 break
             }
         }
         viewModelScope.launch {
             try {
-                val ids = inventoryRepository.observeShoppingList().first()
-                    .map { it.ingredientId }
-                    .distinct()
+                val ids = resolveCurrentShoppingIds()
                 if (ids.isEmpty()) return@launch
                 inventoryRepository.removeFromShoppingList(ids)
                     .onSuccess {
-                        interaction.update {
-                            it.copy(snackbarMessage = "Cleared shopping list")
-                        }
+                        val idSet = ids.toSet()
+                        interaction.update { it.copy(optimisticQuantities = it.optimisticQuantities - idSet) }
+                        emitSnackbar("Cleared shopping list")
                     }
                     .onFailure { error ->
-                        interaction.update {
-                            it.copy(
-                                snackbarMessage = error.message?.takeIf { msg -> msg.isNotBlank() }
-                                    ?: "Unable to clear shopping list.",
-                            )
-                        }
+                        emitSnackbar(
+                            error.message?.takeIf { msg -> msg.isNotBlank() }
+                                ?: "Unable to clear shopping list.",
+                        )
                     }
             } catch (e: CancellationException) {
                 throw e
@@ -664,13 +995,14 @@ class InventoryViewModel(
                 inventoryRepository.getUnlockedCocktails(ingredientId)
                     .onSuccess { cocktails ->
                         if (requestId != unlockedSheetRequestId) return@launch
+                        val deduplicated = cocktails.distinctBy { it.id }
                         interaction.update { current ->
                             val draft = current.unlockedSheetDraft ?: return@update current
                             if (draft.ingredientId != ingredientId) return@update current
                             current.copy(
                                 unlockedSheetDraft = draft.copy(
                                     isLoading = false,
-                                    cocktails = cocktails,
+                                    cocktails = deduplicated,
                                     errorMessage = null,
                                 ),
                             )
@@ -716,8 +1048,42 @@ class InventoryViewModel(
         interaction.update { it.copy(unlockedSheetDraft = null) }
     }
 
-    fun consumeSnackbar() {
-        interaction.update { it.copy(snackbarMessage = null) }
+    fun consumeSnackbar(eventId: Long) {
+        interaction.update { current ->
+            if (current.snackbarEvent?.id == eventId) {
+                current.copy(snackbarEvent = null)
+            } else {
+                current
+            }
+        }
+    }
+
+    private fun emitSnackbar(message: String) {
+        interaction.update { current ->
+            val nextId = current.lastSnackbarId + 1L
+            current.copy(
+                lastSnackbarId = nextId,
+                snackbarEvent = InventorySnackbarEvent(id = nextId, message = message),
+            )
+        }
+    }
+
+    private fun cancelQuantityJob(ingredientId: Int): Long {
+        val nextGeneration = (quantityGenerations[ingredientId] ?: 0L) + 1L
+        quantityGenerations[ingredientId] = nextGeneration
+        quantityUpdateJobs.remove(ingredientId)?.cancel()
+        return nextGeneration
+    }
+
+    private suspend fun resolveCurrentShoppingIds(): List<Int> {
+        val snapshot = interaction.value
+        return if (snapshot.hasReceivedShoppingList) {
+            snapshot.roomShoppingMap.keys.toList()
+        } else {
+            shoppingListFlow.first()
+                .map { it.ingredientId }
+                .distinct()
+        }
     }
 
     private fun launchRecommendationsLoad(): Job {
@@ -734,9 +1100,10 @@ class InventoryViewModel(
                 inventoryRepository.getRecommendedIngredients()
                     .onSuccess { items ->
                         if (generation != recommendationsGeneration) return@launch
+                        val deduplicated = items.distinctBy { it.id }
                         interaction.update {
                             it.copy(
-                                recommendations = items,
+                                recommendations = deduplicated,
                                 isLoadingRecommendations = false,
                                 recommendationsError = null,
                             )
@@ -769,18 +1136,27 @@ class InventoryViewModel(
         return job
     }
 
-    private fun pruneStaleCategory(ingredients: List<IngredientSummary>) {
-        val validCategories = ingredients.mapNotNullTo(HashSet()) {
-            it.categoryName?.trim()?.takeIf { name -> name.isNotEmpty() }
-        }
-        interaction.update { current ->
-            val selected = current.selectedCategory
-            if (selected != null && selected !in validCategories) {
-                current.copy(selectedCategory = null)
-            } else {
-                current
-            }
-        }
+    private fun isShoppingOverrideConverged(
+        ingredientId: Int,
+        target: Boolean,
+        inFlightShoppingIds: Set<Int>,
+        inFlightPurchaseIds: Set<Int>,
+        roomShoppingMap: Map<Int, Int>,
+        roomCatalogShoppingIds: Set<Int>,
+    ): Boolean {
+        if (ingredientId in inFlightShoppingIds || ingredientId in inFlightPurchaseIds) return false
+        return isShoppingStateConverged(ingredientId, target, roomShoppingMap, roomCatalogShoppingIds)
+    }
+
+    private fun isShoppingStateConverged(
+        ingredientId: Int,
+        target: Boolean,
+        roomShoppingMap: Map<Int, Int>,
+        roomCatalogShoppingIds: Set<Int>,
+    ): Boolean = if (target) {
+        ingredientId in roomShoppingMap
+    } else {
+        ingredientId !in roomShoppingMap && ingredientId !in roomCatalogShoppingIds
     }
 
     private fun applyBooleanOverrides(

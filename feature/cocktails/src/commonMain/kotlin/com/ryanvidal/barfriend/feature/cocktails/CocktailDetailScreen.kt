@@ -121,19 +121,12 @@ fun CocktailDetailScreen(
         }
     }
 
-    LaunchedEffect(uiState.errorMessage, uiState.cocktail != null) {
-        val message = uiState.errorMessage
-        if (message != null && uiState.cocktail != null) {
-            snackbarHostState.showSnackbar(message)
-            viewModel.clearError()
-        }
-    }
-
-    LaunchedEffect(uiState.snackbarMessage) {
-        val message = uiState.snackbarMessage
-        if (message != null) {
-            snackbarHostState.showSnackbar(message)
-            viewModel.consumeSnackbar()
+    LaunchedEffect(uiState.snackbarEvent?.id) {
+        val event = uiState.snackbarEvent ?: return@LaunchedEffect
+        try {
+            snackbarHostState.showSnackbar(event.message)
+        } finally {
+            viewModel.consumeSnackbar(event.id)
         }
     }
 
@@ -367,11 +360,13 @@ fun CocktailDetailContent(
                     item(key = "ingredients_header") {
                         SectionHeader(
                             title = "Ingredients (${sortedIngredients.size})",
-                            trailing = if (!uiState.isMakeMode && unlistedMissingCount > 0) {
+                            trailing = if (!uiState.isMakeMode && (unlistedMissingCount > 0 || uiState.isAddingMissingToShoppingList)) {
                                 {
                                     TextButton(
                                         onClick = onAddMissingToShoppingList,
-                                        enabled = !uiState.isAddingMissingToShoppingList,
+                                        enabled = !uiState.isAddingMissingToShoppingList &&
+                                            uiState.shoppingListInFlightIds.isEmpty() &&
+                                            !uiState.isDeleting,
                                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                     ) {
                                         if (uiState.isAddingMissingToShoppingList) {
@@ -382,8 +377,13 @@ fun CocktailDetailContent(
                                             Spacer(modifier = Modifier.width(6.dp))
                                         }
                                         Text(
-                                            text = "Add missing ($unlistedMissingCount)",
+                                            text = if (uiState.isAddingMissingToShoppingList) {
+                                                "Adding..."
+                                            } else {
+                                                "Add missing ($unlistedMissingCount)"
+                                            },
                                             maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
                                         )
                                     }
                                 }
@@ -412,7 +412,9 @@ fun CocktailDetailContent(
                                 scaleFactor = uiState.scaleFactor,
                                 isMakeMode = uiState.isMakeMode,
                                 inShoppingList = ingredient.ingredientId in uiState.shoppingListIngredientIds,
-                                isShoppingListBusy = ingredient.ingredientId in uiState.shoppingListInFlightIds,
+                                isShoppingListBusy = ingredient.ingredientId in uiState.shoppingListInFlightIds ||
+                                    uiState.isAddingMissingToShoppingList ||
+                                    uiState.isDeleting,
                                 onToggleShoppingList = {
                                     onToggleShoppingList(ingredient.ingredientId, ingredient.name)
                                 },

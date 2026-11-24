@@ -131,18 +131,17 @@ class DefaultAuthRepository(
         }
 
         val chosen = bars.firstOrNull { it.status.equals("active", ignoreCase = true) } ?: bars.first()
+        val resolvedUserId = runCatching {
+            api.getProfile(normalized, tokenDto.token).id
+        }.onFailure { if (it is CancellationException) throw it }
+            .getOrNull()
         sessionRepository.saveSession(
             serverUrl = normalized,
             token = tokenDto.token,
             barId = chosen.id,
             barName = chosen.name,
+            userId = resolvedUserId,
         )
-        runCatching { api.getProfile().id }
-            .onSuccess { userId ->
-                runCatching { sessionRepository.setActiveUserId(userId) }
-                    .onFailure { if (it is CancellationException) throw it }
-            }
-            .onFailure { if (it is CancellationException) throw it }
 
         return Result.success(
             Bar(

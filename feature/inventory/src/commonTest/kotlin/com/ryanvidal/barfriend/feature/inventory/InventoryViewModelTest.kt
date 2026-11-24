@@ -14,6 +14,7 @@ import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.ShoppingListItem
 import com.ryanvidal.barfriend.core.model.UnlockedCocktail
 import com.ryanvidal.barfriend.core.model.UploadedImage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -37,6 +39,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -82,7 +85,7 @@ class InventoryViewModelTest {
             name = "Sweet Vermouth",
             strength = 16.5,
             categoryName = "Vermouth",
-            mainImageThumbUrl = null,
+            mainImageThumbUrl = "https://example.com/vermouth.jpg",
             inBarShelf = false,
             inShoppingList = true,
         ),
@@ -193,10 +196,11 @@ class InventoryViewModelTest {
 
         assertFalse(viewModel.uiState.value.allIngredients.first { it.id == 3 }.inBarShelf)
         assertTrue(viewModel.uiState.value.recommendations.any { it.id == 3 })
-        assertEquals("Network unavailable", viewModel.uiState.value.snackbarMessage)
-        viewModel.consumeSnackbar()
+        val event = assertNotNull(viewModel.uiState.value.snackbarEvent)
+        assertEquals("Network unavailable", event.message)
+        viewModel.consumeSnackbar(event.id)
         testDispatcher.scheduler.runCurrent()
-        assertNull(viewModel.uiState.value.snackbarMessage)
+        assertNull(viewModel.uiState.value.snackbarEvent)
 
         // Succeed 4 -> stays in bar shelf and triggers recommendations reload
         gates.getValue(4).complete(Result.success(Unit))
@@ -209,7 +213,7 @@ class InventoryViewModelTest {
         assertEquals(2, inventoryRepo.getRecommendedCalls)
 
         // Toggling shopping list on a shelf item updates recommendation badge without reloading recommendations
-        viewModel.toggleShoppingList(1)
+        viewModel.toggleShoppingList(1, true)
         advanceUntilIdle()
         assertEquals(2, inventoryRepo.getRecommendedCalls)
     }
@@ -261,8 +265,9 @@ class InventoryViewModelTest {
         advanceUntilIdle()
         assertFalse(viewModel.uiState.value.shoppingList.any { it.ingredientId == 3 })
         assertTrue(viewModel.uiState.value.allIngredients.first { it.id == 3 }.inBarShelf)
-        assertEquals("Moved Sweet Vermouth to Bar Shelf", viewModel.uiState.value.snackbarMessage)
-        viewModel.consumeSnackbar()
+        val purchasedEvent = assertNotNull(viewModel.uiState.value.snackbarEvent)
+        assertEquals("Moved Sweet Vermouth to Bar Shelf", purchasedEvent.message)
+        viewModel.consumeSnackbar(purchasedEvent.id)
 
         // Bulk markAllPurchased with guard
         viewModel.addToShoppingList(4)
@@ -331,7 +336,7 @@ class InventoryViewModelTest {
 
         // Live sync inside sheet when toggling shelf and shopping list
         viewModel.toggleBarShelf(3, true)
-        viewModel.toggleShoppingList(3)
+        viewModel.toggleShoppingList(3, false)
         advanceUntilIdle()
 
         val updatedSheet = assertNotNull(viewModel.uiState.value.unlockedSheet)
@@ -359,7 +364,7 @@ class InventoryViewModelTest {
     }
 
     @Test
-    fun `updateQuantity guards per-id re-entrancy while allowing concurrent updates on distinct ids`() = runTest(testDispatcher) {
+    fun `updateQuantity coalesces rapid taps per id while allowing concurrent updates on distinct ids`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
         val gates = mapOf(
             3 to CompletableDeferred<Result<Unit>>(),
@@ -384,16 +389,595 @@ class InventoryViewModelTest {
         viewModel.updateQuantity(4, 5)
         testDispatcher.scheduler.runCurrent()
 
-        assertEquals(setOf(3, 4), viewModel.uiState.value.inFlightShoppingIds)
-        assertEquals(listOf(3 to 2, 4 to 5), inventoryRepo.updateQuantityCalls)
+        assertEquals(setOf(3, 4), viewModel.uiState.value.pendingQuantityIds)
+        assertTrue(viewModel.uiState.value.inFlightQuantityIds.isEmpty())
+        assertTrue(inventoryRepo.updateQuantityCalls.isEmpty())
+
+        testDispatcher.scheduler.advanceTimeBy(250L)
+        testDispatcher.scheduler.runCurrent()
+
+        assertTrue(viewModel.uiState.value.pendingQuantityIds.isEmpty())
+        assertEquals(setOf(3, 4), viewModel.uiState.value.inFlightQuantityIds)
+        assertEquals(listOf(3 to 3, 4 to 5), inventoryRepo.updateQuantityCalls)
 
         gates.getValue(3).complete(Result.success(Unit))
         gates.getValue(4).complete(Result.success(Unit))
         advanceUntilIdle()
 
-        assertTrue(viewModel.uiState.value.inFlightShoppingIds.isEmpty())
-        assertEquals(2, viewModel.uiState.value.shoppingList.first { it.ingredientId == 3 }.quantity)
+        assertTrue(viewModel.uiState.value.inFlightQuantityIds.isEmpty())
+        assertEquals(3, viewModel.uiState.value.shoppingList.first { it.ingredientId == 3 }.quantity)
         assertEquals(5, viewModel.uiState.value.shoppingList.first { it.ingredientId == 4 }.quantity)
+    }
+
+    @Test
+    fun `deduplicates recommendations and unlocked cocktails and enriches missing recommendation metadata`() = runTest(testDispatcher) {
+        val ingredients = sampleIngredients()
+        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
+            recommendedResult = Result.success(
+                listOf(
+                    RecommendedIngredient(
+                        id = 3,
+                        slug = "sweet-vermouth",
+                        name = "Sweet Vermouth",
+                        potentialCocktails = 4,
+                        categoryName = null,
+                        mainImageThumbUrl = null,
+                    ),
+                    RecommendedIngredient(
+                        id = 3,
+                        slug = "sweet-vermouth",
+                        name = "Sweet Vermouth Duplicate",
+                        potentialCocktails = 4,
+                    ),
+                    RecommendedIngredient(
+                        id = 4,
+                        slug = "lime-juice",
+                        name = "Fresh Lime Juice",
+                        potentialCocktails = 2,
+                        categoryName = "Citrus",
+                    ),
+                ),
+            )
+            unlockedCocktailsMap[3] = Result.success(
+                listOf(
+                    UnlockedCocktail(101, "negroni", "Negroni"),
+                    UnlockedCocktail(101, "negroni", "Negroni"),
+                    UnlockedCocktail(102, "manhattan", "Manhattan"),
+                ),
+            )
+        }
+        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        assertEquals(listOf(3, 4), viewModel.uiState.value.recommendations.map { it.id })
+        val vermouthRec = viewModel.uiState.value.recommendations.first { it.id == 3 }
+        assertEquals("Vermouth", vermouthRec.categoryName)
+        assertEquals("https://example.com/vermouth.jpg", vermouthRec.mainImageThumbUrl)
+
+        viewModel.openUnlockedCocktails(3, "Sweet Vermouth")
+        advanceUntilIdle()
+        val sheet = assertNotNull(viewModel.uiState.value.unlockedSheet)
+        assertEquals(listOf(101, 102), sheet.cocktails.map { it.id })
+    }
+
+    @Test
+    fun `isRefreshing stays false when only syncStatus isSyncing is true`() = runTest(testDispatcher) {
+        val ingredients = sampleIngredients()
+        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients)
+        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        cocktailRepo.setSyncStatus(SyncStatus(isSyncing = true))
+        testDispatcher.scheduler.runCurrent()
+
+        assertTrue(viewModel.uiState.value.syncStatus.isSyncing)
+        assertFalse(viewModel.uiState.value.isRefreshing)
+
+        val syncGate = CompletableDeferred<Result<Unit>>()
+        cocktailRepo.syncAllHook = { syncGate.await() }
+        cocktailRepo.setSyncStatus(SyncStatus(isSyncing = false))
+
+        viewModel.refreshAll()
+        testDispatcher.scheduler.runCurrent()
+        assertTrue(viewModel.uiState.value.isRefreshing)
+
+        syncGate.complete(Result.success(Unit))
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.isRefreshing)
+    }
+
+    @Test
+    fun `markAllPurchased and clearShoppingList reject while per-item ops or pending quantities are in flight`() = runTest(testDispatcher) {
+        val ingredients = sampleIngredients()
+        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val shelfGate = CompletableDeferred<Result<Unit>>()
+        val shoppingGate = CompletableDeferred<Result<Unit>>()
+        val purchaseGate = CompletableDeferred<Result<Unit>>()
+        val quantityGate = CompletableDeferred<Result<Unit>>()
+        val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients)
+        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        // 1. Shelf mutation in flight
+        inventoryRepo.setInBarShelfHook = { _, _ -> shelfGate.await() }
+        viewModel.toggleBarShelf(4, true)
+        testDispatcher.scheduler.runCurrent()
+        assertTrue(viewModel.uiState.value.hasInFlightItemMutations)
+
+        viewModel.markAllPurchased()
+        viewModel.clearShoppingList()
+        testDispatcher.scheduler.runCurrent()
+        assertFalse(viewModel.uiState.value.isBulkUpdating)
+        assertEquals(0, inventoryRepo.bulkMarkPurchasedCalls)
+        assertTrue(inventoryRepo.removeFromShoppingListCalls.isEmpty())
+
+        shelfGate.complete(Result.success(Unit))
+        advanceUntilIdle()
+        inventoryRepo.setInBarShelfHook = null
+
+        // 2. Shopping list mutation in flight
+        inventoryRepo.addToShoppingListHook = { _, _ -> shoppingGate.await() }
+        viewModel.addToShoppingList(1)
+        testDispatcher.scheduler.runCurrent()
+        assertTrue(viewModel.uiState.value.hasInFlightItemMutations)
+
+        viewModel.markAllPurchased()
+        viewModel.clearShoppingList()
+        testDispatcher.scheduler.runCurrent()
+        assertFalse(viewModel.uiState.value.isBulkUpdating)
+
+        shoppingGate.complete(Result.success(Unit))
+        advanceUntilIdle()
+        inventoryRepo.addToShoppingListHook = null
+
+        // 3. Purchase mutation in flight
+        inventoryRepo.markPurchasedHook = { purchaseGate.await() }
+        viewModel.markPurchased(1)
+        testDispatcher.scheduler.runCurrent()
+        assertTrue(viewModel.uiState.value.hasInFlightItemMutations)
+
+        viewModel.markAllPurchased()
+        viewModel.clearShoppingList()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(1, inventoryRepo.bulkMarkPurchasedCalls) // only the single markPurchased(1) call
+
+        purchaseGate.complete(Result.success(Unit))
+        advanceUntilIdle()
+        inventoryRepo.markPurchasedHook = null
+
+        // 4. Pending debounced quantity update
+        inventoryRepo.updateQuantityHook = { _, _ -> quantityGate.await() }
+        viewModel.updateQuantity(3, 2)
+        testDispatcher.scheduler.runCurrent()
+        assertTrue(viewModel.uiState.value.pendingQuantityIds.contains(3))
+        assertTrue(viewModel.uiState.value.hasInFlightItemMutations)
+
+        viewModel.markAllPurchased()
+        viewModel.clearShoppingList()
+        testDispatcher.scheduler.runCurrent()
+        assertFalse(viewModel.uiState.value.isBulkUpdating)
+
+        // 5. In-flight quantity update
+        testDispatcher.scheduler.advanceTimeBy(250L)
+        testDispatcher.scheduler.runCurrent()
+        assertTrue(viewModel.uiState.value.inFlightQuantityIds.contains(3))
+        assertTrue(viewModel.uiState.value.hasInFlightItemMutations)
+
+        viewModel.markAllPurchased()
+        viewModel.clearShoppingList()
+        testDispatcher.scheduler.runCurrent()
+        assertFalse(viewModel.uiState.value.isBulkUpdating)
+
+        quantityGate.complete(Result.success(Unit))
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.hasInFlightItemMutations)
+
+        // Once all per-item mutations finish, bulk actions succeed
+        viewModel.clearShoppingList()
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.shoppingList.isEmpty())
+    }
+
+    @Test
+    fun `rapid coalesced updateQuantity taps send only final quantity and decrement to zero hides immediately`() = runTest(testDispatcher) {
+        val ingredients = sampleIngredients()
+        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val removeGate = CompletableDeferred<Result<Unit>>()
+        val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
+            removeFromShoppingListHook = { removeGate.await() }
+        }
+        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        viewModel.updateQuantity(3, 2)
+        testDispatcher.scheduler.advanceTimeBy(50L)
+        viewModel.updateQuantity(3, 3)
+        testDispatcher.scheduler.advanceTimeBy(50L)
+        viewModel.updateQuantity(3, 4)
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(4, viewModel.uiState.value.shoppingList.first { it.ingredientId == 3 }.quantity)
+        assertEquals(setOf(3), viewModel.uiState.value.pendingQuantityIds)
+        assertTrue(inventoryRepo.updateQuantityCalls.isEmpty())
+
+        testDispatcher.scheduler.advanceTimeBy(250L)
+        advanceUntilIdle()
+
+        assertEquals(listOf(3 to 4), inventoryRepo.updateQuantityCalls)
+        assertTrue(viewModel.uiState.value.pendingQuantityIds.isEmpty())
+        assertTrue(viewModel.uiState.value.inFlightQuantityIds.isEmpty())
+
+        // Decrementing 1 -> 0 hides item optimistically right away while remove is in flight
+        viewModel.updateQuantity(3, 0)
+        testDispatcher.scheduler.runCurrent()
+
+        assertTrue(viewModel.uiState.value.shoppingList.none { it.ingredientId == 3 })
+        assertEquals(setOf(3), viewModel.uiState.value.inFlightShoppingIds)
+        assertEquals(listOf(listOf(3)), inventoryRepo.removeFromShoppingListCalls)
+
+        removeGate.complete(Result.success(Unit))
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.inFlightShoppingIds.isEmpty())
+        assertTrue(viewModel.uiState.value.shoppingList.isEmpty())
+    }
+
+    @Test
+    fun `superseding an in-flight updateQuantity does not clobber newer optimistic quantity or emit cancellation error`() = runTest(testDispatcher) {
+        val ingredients = sampleIngredients()
+        val firstGate = CompletableDeferred<Result<Unit>>()
+        val secondGate = CompletableDeferred<Result<Unit>>()
+        var callCount = 0
+        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
+            updateQuantityHook = { _, _ ->
+                callCount += 1
+                if (callCount == 1) firstGate.await() else secondGate.await()
+            }
+        }
+        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        viewModel.updateQuantity(3, 4)
+        testDispatcher.scheduler.advanceTimeBy(250L)
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(setOf(3), viewModel.uiState.value.inFlightQuantityIds)
+
+        // Supersede while first call is in flight
+        viewModel.updateQuantity(3, 5)
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(5, viewModel.uiState.value.shoppingList.first { it.ingredientId == 3 }.quantity)
+        assertEquals(setOf(3), viewModel.uiState.value.pendingQuantityIds)
+        assertTrue(viewModel.uiState.value.inFlightQuantityIds.isEmpty())
+        assertNull(viewModel.uiState.value.snackbarEvent)
+
+        // Complete second debounce + request
+        testDispatcher.scheduler.advanceTimeBy(250L)
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(listOf(3 to 4, 3 to 5), inventoryRepo.updateQuantityCalls)
+
+        secondGate.complete(Result.success(Unit))
+        advanceUntilIdle()
+
+        assertNull(viewModel.uiState.value.snackbarEvent)
+        assertEquals(5, viewModel.uiState.value.shoppingList.first { it.ingredientId == 3 }.quantity)
+    }
+
+    @Test
+    fun `converged optimistic overrides do not snap back when Room emission lags after success`() = runTest(testDispatcher) {
+        val ingredients = sampleIngredients()
+        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients)
+        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        // 1. Shelf toggle succeeds while Room emission lags
+        val shelfGate = CompletableDeferred<Unit>()
+        inventoryRepo.delayRoomEmissionGate = shelfGate
+        viewModel.toggleBarShelf(4, true)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.uiState.value.inFlightShelfIds.isEmpty())
+        assertTrue(viewModel.uiState.value.allIngredients.first { it.id == 4 }.inBarShelf)
+
+        shelfGate.complete(Unit)
+        inventoryRepo.delayRoomEmissionGate = null
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.allIngredients.first { it.id == 4 }.inBarShelf)
+
+        // 2. Quantity update succeeds while Room emission lags
+        val qtyGate = CompletableDeferred<Unit>()
+        inventoryRepo.delayRoomEmissionGate = qtyGate
+        viewModel.updateQuantity(3, 4)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.uiState.value.inFlightQuantityIds.isEmpty())
+        assertEquals(4, viewModel.uiState.value.shoppingList.first { it.ingredientId == 3 }.quantity)
+
+        qtyGate.complete(Unit)
+        inventoryRepo.delayRoomEmissionGate = null
+        advanceUntilIdle()
+        assertEquals(4, viewModel.uiState.value.shoppingList.first { it.ingredientId == 3 }.quantity)
+
+        // 3. Shopping toggle / markPurchased succeeds while Room emission lags
+        val purchaseGate = CompletableDeferred<Unit>()
+        inventoryRepo.delayRoomEmissionGate = purchaseGate
+        viewModel.markPurchased(3)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.uiState.value.inFlightPurchaseIds.isEmpty())
+        assertTrue(viewModel.uiState.value.allIngredients.first { it.id == 3 }.inBarShelf)
+        assertFalse(viewModel.uiState.value.allIngredients.first { it.id == 3 }.inShoppingList)
+        assertTrue(viewModel.uiState.value.shoppingList.none { it.ingredientId == 3 })
+
+        purchaseGate.complete(Unit)
+        inventoryRepo.delayRoomEmissionGate = null
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.allIngredients.first { it.id == 3 }.inBarShelf)
+        assertFalse(viewModel.uiState.value.allIngredients.first { it.id == 3 }.inShoppingList)
+
+        // 4. Shopping toggle add succeeds while Room emission lags
+        val addShoppingGate = CompletableDeferred<Unit>()
+        inventoryRepo.delayRoomEmissionGate = addShoppingGate
+        viewModel.toggleShoppingList(1, true)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.uiState.value.inFlightShoppingIds.isEmpty())
+        assertTrue(viewModel.uiState.value.allIngredients.first { it.id == 1 }.inShoppingList)
+
+        addShoppingGate.complete(Unit)
+        inventoryRepo.delayRoomEmissionGate = null
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.allIngredients.first { it.id == 1 }.inShoppingList)
+    }
+
+    @Test
+    fun `failure paths emit snackbars, set recommendation errors, and roll back optimistic states`() = runTest(testDispatcher) {
+        val ingredients = sampleIngredients()
+        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
+            recommendedResult = Result.failure(IllegalStateException("Recommendations down"))
+        }
+        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        assertEquals("Recommendations down", viewModel.uiState.value.recommendationsError)
+
+        // toggleShoppingList failure rolls back
+        inventoryRepo.addToShoppingListHook = { _, _ -> Result.failure(IllegalStateException("Add toggle failed")) }
+        viewModel.toggleShoppingList(1, true)
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.allIngredients.first { it.id == 1 }.inShoppingList)
+        assertEquals("Add toggle failed", viewModel.uiState.value.snackbarMessage)
+
+        // addToShoppingList failure rolls back
+        inventoryRepo.addToShoppingListHook = { _, _ -> Result.failure(IllegalStateException("Add sheet failed")) }
+        viewModel.addToShoppingList(4)
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.allIngredients.first { it.id == 4 }.inShoppingList)
+        assertEquals("Add sheet failed", viewModel.uiState.value.snackbarMessage)
+        inventoryRepo.addToShoppingListHook = null
+
+        // updateQuantity failure rolls back quantity
+        inventoryRepo.updateQuantityHook = { _, _ -> Result.failure(IllegalStateException("Quantity failed")) }
+        viewModel.updateQuantity(3, 5)
+        advanceUntilIdle()
+        assertEquals(1, viewModel.uiState.value.shoppingList.first { it.ingredientId == 3 }.quantity)
+        assertEquals("Quantity failed", viewModel.uiState.value.snackbarMessage)
+        inventoryRepo.updateQuantityHook = null
+
+        // updateQuantity <= 0 failure keeps item on shopping list
+        inventoryRepo.removeFromShoppingListHook = { Result.failure(IllegalStateException("Remove failed")) }
+        viewModel.updateQuantity(3, 0)
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.shoppingList.any { it.ingredientId == 3 })
+        assertEquals("Remove failed", viewModel.uiState.value.snackbarMessage)
+
+        // removeFromShoppingList failure rolls back
+        viewModel.removeFromShoppingList(3)
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.shoppingList.any { it.ingredientId == 3 })
+        assertEquals("Remove failed", viewModel.uiState.value.snackbarMessage)
+
+        // clearShoppingList failure
+        viewModel.clearShoppingList()
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.isBulkUpdating)
+        assertEquals("Remove failed", viewModel.uiState.value.snackbarMessage)
+        inventoryRepo.removeFromShoppingListHook = null
+
+        // markPurchased failure rolls back both shelf and shopping list
+        inventoryRepo.markPurchasedHook = { Result.failure(IllegalStateException("Purchase failed")) }
+        viewModel.markPurchased(3)
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.allIngredients.first { it.id == 3 }.inBarShelf)
+        assertTrue(viewModel.uiState.value.shoppingList.any { it.ingredientId == 3 })
+        assertEquals("Purchase failed", viewModel.uiState.value.snackbarMessage)
+
+        // markAllPurchased failure
+        viewModel.markAllPurchased()
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.isBulkUpdating)
+        assertEquals("Purchase failed", viewModel.uiState.value.snackbarMessage)
+        inventoryRepo.markPurchasedHook = null
+
+        // refreshAll syncAll failure
+        cocktailRepo.syncAllResult = Result.failure(IllegalStateException("Server offline"))
+        viewModel.refreshAll()
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.isRefreshing)
+        assertEquals("Server offline", viewModel.uiState.value.snackbarMessage)
+    }
+
+    @Test
+    fun `openUnlockedCocktails ignores stale and dismissed responses`() = runTest(testDispatcher) {
+        val ingredients = sampleIngredients()
+        val gate3 = CompletableDeferred<Result<List<UnlockedCocktail>>>()
+        val gate4 = CompletableDeferred<Result<List<UnlockedCocktail>>>()
+        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
+            getUnlockedCocktailsHook = { id ->
+                if (id == 3) gate3.await() else gate4.await()
+            }
+        }
+        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        // Request 3, then supersede with 4 before 3 returns
+        viewModel.openUnlockedCocktails(3, "Sweet Vermouth")
+        testDispatcher.scheduler.runCurrent()
+        viewModel.openUnlockedCocktails(4, "Fresh Lime Juice")
+        testDispatcher.scheduler.runCurrent()
+
+        gate4.complete(Result.success(listOf(UnlockedCocktail(201, "daiquiri", "Daiquiri"))))
+        gate3.complete(Result.success(listOf(UnlockedCocktail(101, "negroni", "Negroni"))))
+        advanceUntilIdle()
+
+        val activeSheet = assertNotNull(viewModel.uiState.value.unlockedSheet)
+        assertEquals(4, activeSheet.ingredientId)
+        assertEquals(listOf("Daiquiri"), activeSheet.cocktails.map { it.name })
+
+        // Dismiss while a request is in flight -> late response does not reopen sheet
+        val lateGate = CompletableDeferred<Result<List<UnlockedCocktail>>>()
+        inventoryRepo.getUnlockedCocktailsHook = { lateGate.await() }
+        viewModel.openUnlockedCocktails(3, "Sweet Vermouth")
+        testDispatcher.scheduler.runCurrent()
+        viewModel.dismissUnlockedCocktails()
+        lateGate.complete(Result.success(listOf(UnlockedCocktail(101, "negroni", "Negroni"))))
+        advanceUntilIdle()
+
+        assertNull(viewModel.uiState.value.unlockedSheet)
+    }
+
+    @Test
+    fun `empty catalog defers recommendations until populated and refreshAll executes syncAll then syncShoppingList sequentially`() = runTest(testDispatcher) {
+        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog())
+        val inventoryRepo = FakeInventoryRepository(initialIngredients = emptyList())
+        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        // Cold start with empty catalog does not fire premature recommendations load
+        assertEquals(0, inventoryRepo.getRecommendedCalls)
+
+        // Populating catalog triggers initial load once
+        inventoryRepo.replaceCatalogForBar(sampleIngredients())
+        advanceUntilIdle()
+        assertEquals(1, inventoryRepo.getRecommendedCalls)
+
+        // Emptying catalog resets initial load flag so re-populating loads again
+        inventoryRepo.replaceCatalogForBar(emptyList())
+        advanceUntilIdle()
+        inventoryRepo.replaceCatalogForBar(sampleIngredients())
+        advanceUntilIdle()
+        assertEquals(2, inventoryRepo.getRecommendedCalls)
+
+        // Sequential refreshAll verification
+        val syncGate = CompletableDeferred<Result<Unit>>()
+        val shoppingGate = CompletableDeferred<Result<Unit>>()
+        cocktailRepo.syncAllHook = { syncGate.await() }
+        inventoryRepo.syncShoppingListHook = { shoppingGate.await() }
+
+        viewModel.refreshAll()
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(1, cocktailRepo.syncAllCalls)
+        assertEquals(0, inventoryRepo.syncShoppingListCalls)
+        assertEquals(2, inventoryRepo.getRecommendedCalls)
+
+        syncGate.complete(Result.success(Unit))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(1, inventoryRepo.syncShoppingListCalls)
+        assertEquals(2, inventoryRepo.getRecommendedCalls)
+
+        shoppingGate.complete(Result.success(Unit))
+        advanceUntilIdle()
+
+        assertEquals(3, inventoryRepo.getRecommendedCalls)
+        assertFalse(viewModel.uiState.value.isRefreshing)
+
+        // syncAll failure skips syncShoppingList and recommendations
+        cocktailRepo.syncAllHook = { Result.failure(IllegalStateException("Auth expired")) }
+        viewModel.refreshAll()
+        advanceUntilIdle()
+
+        assertEquals(1, inventoryRepo.syncShoppingListCalls)
+        assertEquals(3, inventoryRepo.getRecommendedCalls)
+        assertEquals("Auth expired", viewModel.uiState.value.snackbarMessage)
+    }
+
+    @Test
+    fun `monotonic snackbar events emit distinct ids for identical messages and consumeSnackbar checks id`() = runTest(testDispatcher) {
+        val ingredients = sampleIngredients()
+        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
+            setInBarShelfHook = { _, _ -> Result.failure(IllegalStateException("Network error")) }
+        }
+        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        viewModel.toggleBarShelf(3, true)
+        advanceUntilIdle()
+        val firstEvent = assertNotNull(viewModel.uiState.value.snackbarEvent)
+        assertEquals("Network error", firstEvent.message)
+
+        viewModel.toggleBarShelf(4, true)
+        advanceUntilIdle()
+        val secondEvent = assertNotNull(viewModel.uiState.value.snackbarEvent)
+        assertEquals("Network error", secondEvent.message)
+        assertNotEquals(firstEvent.id, secondEvent.id)
+        assertTrue(secondEvent.id > firstEvent.id)
+
+        // Consuming an older event id must not clear the newer event
+        viewModel.consumeSnackbar(firstEvent.id)
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(secondEvent, viewModel.uiState.value.snackbarEvent)
+
+        viewModel.consumeSnackbar(secondEvent.id)
+        testDispatcher.scheduler.runCurrent()
+        assertNull(viewModel.uiState.value.snackbarEvent)
     }
 }
 
@@ -402,7 +986,7 @@ private class FakeInventoryRepository(
 ) : InventoryRepository {
     private val catalogIngredients = MutableStateFlow(initialIngredients)
     private val shelfIds: MutableStateFlow<Set<Int>> = MutableStateFlow(
-        initialIngredients.filter { it.inBarShelf }.map { it.id }.toSet(),
+        initialIngredients.filter { it.inBarShelf }.mapTo(LinkedHashSet()) { it.id },
     )
     private val shoppingMap = MutableStateFlow(
         initialIngredients
@@ -419,15 +1003,21 @@ private class FakeInventoryRepository(
             },
     )
 
+    var delayRoomEmissionGate: CompletableDeferred<Unit>? = null
     var recommendedResult: Result<List<RecommendedIngredient>> = Result.success(emptyList())
     val unlockedCocktailsMap = mutableMapOf<Int, Result<List<UnlockedCocktail>>>()
     var syncShoppingListResult: Result<Unit> = Result.success(Unit)
     var setInBarShelfHook: (suspend (Int, Boolean) -> Result<Unit>)? = null
+    var addToShoppingListHook: (suspend (List<Int>, Int) -> Result<Unit>)? = null
     var updateQuantityHook: (suspend (Int, Int) -> Result<Unit>)? = null
+    var removeFromShoppingListHook: (suspend (List<Int>) -> Result<Unit>)? = null
     var markPurchasedHook: (suspend () -> Result<Unit>)? = null
+    var syncShoppingListHook: (suspend () -> Result<Unit>)? = null
+    var getUnlockedCocktailsHook: (suspend (Int) -> Result<List<UnlockedCocktail>>)? = null
 
     val setInBarShelfCalls = mutableListOf<Pair<List<Int>, Boolean>>()
     val updateQuantityCalls = mutableListOf<Pair<Int, Int>>()
+    val removeFromShoppingListCalls = mutableListOf<List<Int>>()
     var getRecommendedCalls = 0
     var syncShoppingListCalls = 0
     var bulkMarkPurchasedCalls = 0
@@ -451,17 +1041,21 @@ private class FakeInventoryRepository(
 
     override fun observeBarShelfIngredients(): Flow<List<IngredientSummary>> =
         combine(catalogIngredients, shelfIds, shoppingMap) { catalog, shelf, shopping ->
-            catalog.filter { it.id in shelf }.map { item ->
+            catalog.map { item ->
                 item.copy(
-                    inBarShelf = true,
+                    inBarShelf = item.id in shelf,
                     inShoppingList = item.id in shopping,
                 )
             }
+        }.onEach {
+            delayRoomEmissionGate?.await()
         }
 
     override fun observeShoppingList(): Flow<List<ShoppingListItem>> =
         shoppingMap.map { map ->
             map.values.sortedBy { it.ingredientName.lowercase() }
+        }.onEach {
+            delayRoomEmissionGate?.await()
         }
 
     override fun observeShoppingListIds(): Flow<Set<Int>> =
@@ -469,61 +1063,114 @@ private class FakeInventoryRepository(
 
     override suspend fun syncShoppingList(): Result<Unit> {
         syncShoppingListCalls += 1
+        syncShoppingListHook?.let { hook -> return hook() }
         return syncShoppingListResult
     }
 
     override suspend fun setInBarShelf(ingredientIds: List<Int>, inStock: Boolean): Result<Unit> {
         setInBarShelfCalls += ingredientIds to inStock
-        setInBarShelfHook?.let { hook ->
-            val result = hook(ingredientIds.first(), inStock)
-            if (result.isFailure) return result
-        }
+        val previousShelf = shelfIds.value
         shelfIds.update { current ->
             val updated = current.toMutableSet()
             if (inStock) updated.addAll(ingredientIds) else updated.removeAll(ingredientIds.toSet())
             updated
         }
+        try {
+            setInBarShelfHook?.let { hook ->
+                val result = hook(ingredientIds.first(), inStock)
+                if (result.isFailure) {
+                    shelfIds.value = previousShelf
+                    return result
+                }
+            }
+        } catch (e: CancellationException) {
+            shelfIds.value = previousShelf
+            throw e
+        }
         return Result.success(Unit)
     }
 
     override suspend fun addToShoppingList(ingredientIds: List<Int>, quantity: Int): Result<Unit> {
+        val previousShopping = shoppingMap.value
         val byId = catalogIngredients.value.associateBy { it.id }
+        val preserveExisting = quantity <= 1
         shoppingMap.update { current ->
             val updated = current.toMutableMap()
             ingredientIds.forEach { id ->
                 val info = byId[id]
                 val existing = updated[id]
+                val resolvedQty = if (preserveExisting && existing != null && existing.quantity > 0) {
+                    existing.quantity
+                } else {
+                    quantity.coerceAtLeast(1)
+                }
                 updated[id] = ShoppingListItem(
                     ingredientId = id,
                     ingredientSlug = info?.slug ?: existing?.ingredientSlug ?: "item-$id",
                     ingredientName = info?.name ?: existing?.ingredientName ?: "Ingredient $id",
                     categoryName = info?.categoryName ?: existing?.categoryName,
-                    quantity = quantity.coerceAtLeast(1),
+                    quantity = resolvedQty,
                     mainImageThumbUrl = info?.mainImageThumbUrl ?: existing?.mainImageThumbUrl,
                 )
             }
             updated
         }
+        try {
+            addToShoppingListHook?.let { hook ->
+                val result = hook(ingredientIds, quantity)
+                if (result.isFailure) {
+                    shoppingMap.value = previousShopping
+                    return result
+                }
+            }
+        } catch (e: CancellationException) {
+            shoppingMap.value = previousShopping
+            throw e
+        }
         return Result.success(Unit)
     }
 
     override suspend fun updateShoppingListQuantity(ingredientId: Int, quantity: Int): Result<Unit> {
+        if (quantity <= 0) return removeFromShoppingList(listOf(ingredientId))
         updateQuantityCalls += ingredientId to quantity
-        updateQuantityHook?.let { hook ->
-            val result = hook(ingredientId, quantity)
-            if (result.isFailure) return result
-        }
+        val previousShopping = shoppingMap.value
         shoppingMap.update { current ->
             val existing = current[ingredientId] ?: return@update current
             current + (ingredientId to existing.copy(quantity = quantity))
+        }
+        try {
+            updateQuantityHook?.let { hook ->
+                val result = hook(ingredientId, quantity)
+                if (result.isFailure) {
+                    shoppingMap.value = previousShopping
+                    return result
+                }
+            }
+        } catch (e: CancellationException) {
+            shoppingMap.value = previousShopping
+            throw e
         }
         return Result.success(Unit)
     }
 
     override suspend fun removeFromShoppingList(ingredientIds: List<Int>): Result<Unit> {
+        removeFromShoppingListCalls += ingredientIds
+        val previousShopping = shoppingMap.value
         val removeSet = ingredientIds.toSet()
         shoppingMap.update { current ->
             current.filterKeys { it !in removeSet }
+        }
+        try {
+            removeFromShoppingListHook?.let { hook ->
+                val result = hook(ingredientIds)
+                if (result.isFailure) {
+                    shoppingMap.value = previousShopping
+                    return result
+                }
+            }
+        } catch (e: CancellationException) {
+            shoppingMap.value = previousShopping
+            throw e
         }
         return Result.success(Unit)
     }
@@ -532,13 +1179,25 @@ private class FakeInventoryRepository(
         if (ingredientIds.size > 1 || markPurchasedHook != null) {
             bulkMarkPurchasedCalls += 1
         }
-        markPurchasedHook?.let { hook ->
-            val result = hook()
-            if (result.isFailure) return result
-        }
+        val previousShelf = shelfIds.value
+        val previousShopping = shoppingMap.value
         val moveSet = ingredientIds.toSet()
         shelfIds.update { it + moveSet }
         shoppingMap.update { current -> current.filterKeys { it !in moveSet } }
+        try {
+            markPurchasedHook?.let { hook ->
+                val result = hook()
+                if (result.isFailure) {
+                    shelfIds.value = previousShelf
+                    shoppingMap.value = previousShopping
+                    return result
+                }
+            }
+        } catch (e: CancellationException) {
+            shelfIds.value = previousShelf
+            shoppingMap.value = previousShopping
+            throw e
+        }
         return Result.success(Unit)
     }
 
@@ -550,8 +1209,10 @@ private class FakeInventoryRepository(
         }
     }
 
-    override suspend fun getUnlockedCocktails(ingredientId: Int): Result<List<UnlockedCocktail>> =
-        unlockedCocktailsMap[ingredientId] ?: Result.success(emptyList())
+    override suspend fun getUnlockedCocktails(ingredientId: Int): Result<List<UnlockedCocktail>> {
+        getUnlockedCocktailsHook?.let { hook -> return hook(ingredientId) }
+        return unlockedCocktailsMap[ingredientId] ?: Result.success(emptyList())
+    }
 }
 
 private class FakeCocktailRepository(
@@ -562,9 +1223,15 @@ private class FakeCocktailRepository(
     private val catalogFlow = MutableStateFlow(initialCatalog)
 
     var syncAllCalls = 0
+    var syncAllResult: Result<Unit> = Result.success(Unit)
+    var syncAllHook: (suspend () -> Result<Unit>)? = null
 
     fun setCatalog(catalog: BarCatalog) {
         catalogFlow.value = catalog
+    }
+
+    fun setSyncStatus(status: SyncStatus) {
+        _syncStatus.value = status
     }
 
     override fun observeCocktails(filter: CocktailFilter): Flow<List<CocktailSummary>> =
@@ -577,7 +1244,8 @@ private class FakeCocktailRepository(
 
     override suspend fun syncAll(force: Boolean): Result<Unit> {
         syncAllCalls += 1
-        return Result.success(Unit)
+        syncAllHook?.let { hook -> return hook() }
+        return syncAllResult
     }
 
     override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> =

@@ -41,6 +41,7 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.forms.formData
 import io.ktor.client.request.forms.submitFormWithBinaryData
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.put
@@ -105,13 +106,14 @@ interface BarAssistantApi {
         perPage: Int = 200,
     ): PaginatedEnvelope<IngredientBasicDto>
     suspend fun getProfile(): ProfileDto
+    suspend fun getProfile(serverUrl: String, token: String): ProfileDto
     suspend fun addBarInventoryIngredients(barId: Int, ingredientIds: List<Int>)
     suspend fun removeBarInventoryIngredients(barId: Int, ingredientIds: List<Int>)
     suspend fun getRecommendedBarIngredients(barId: Int): List<IngredientRecommendDto>
     suspend fun getExtraCocktailsForIngredient(barId: Int, ingredientId: Int): List<CocktailBasicDto>
-    suspend fun getShoppingList(userId: Int): List<ShoppingListItemDto>
-    suspend fun addToShoppingList(userId: Int, items: List<ShoppingListIngredientInputDto>)
-    suspend fun removeFromShoppingList(userId: Int, ingredientIds: List<Int>)
+    suspend fun getShoppingList(barId: Int, userId: Int): List<ShoppingListItemDto>
+    suspend fun addToShoppingList(barId: Int, userId: Int, items: List<ShoppingListIngredientInputDto>)
+    suspend fun removeFromShoppingList(barId: Int, userId: Int, ingredientIds: List<Int>)
 }
 
 @SingleIn(AppScope::class)
@@ -335,6 +337,7 @@ class KtorBarAssistantApi(
         val response = httpClient.get("$base/ingredients") {
             parameter("page", page)
             parameter("per_page", perPage)
+            parameter("include", "images,parentIngredient,ancestors")
         }
         return response.decodeSuccess()
     }
@@ -397,6 +400,15 @@ class KtorBarAssistantApi(
         return response.decodeSuccess<DataEnvelope<ProfileDto>>().data
     }
 
+    override suspend fun getProfile(serverUrl: String, token: String): ProfileDto {
+        val normalized = ServerUrlNormalizer.normalize(serverUrl)
+        val base = ServerUrlNormalizer.apiBaseUrl(normalized)
+        val response = httpClient.get("$base/profile") {
+            attributes.put(ExplicitAuthContextKey, ExplicitAuthContext(normalized, token))
+        }
+        return response.decodeSuccess<DataEnvelope<ProfileDto>>().data
+    }
+
     override suspend fun addBarInventoryIngredients(barId: Int, ingredientIds: List<Int>) {
         val base = requireApiBaseUrl()
         postJson(
@@ -405,6 +417,7 @@ class KtorBarAssistantApi(
                 BarInventoryBatchRequestDto.serializer(),
                 BarInventoryBatchRequestDto(ingredientIds),
             ),
+            barId = barId,
         )
     }
 
@@ -416,12 +429,15 @@ class KtorBarAssistantApi(
                 BarInventoryBatchRequestDto.serializer(),
                 BarInventoryBatchRequestDto(ingredientIds),
             ),
+            barId = barId,
         )
     }
 
     override suspend fun getRecommendedBarIngredients(barId: Int): List<IngredientRecommendDto> {
         val base = requireApiBaseUrl()
-        val response = httpClient.get("$base/bars/$barId/inventory/ingredients/recommend")
+        val response = httpClient.get("$base/bars/$barId/inventory/ingredients/recommend") {
+            header(HEADER_BAR_ID, barId.toString())
+        }
         return response.decodeSuccess<DataEnvelope<List<IngredientRecommendDto>>>().data
     }
 
@@ -430,17 +446,22 @@ class KtorBarAssistantApi(
         ingredientId: Int,
     ): List<CocktailBasicDto> {
         val base = requireApiBaseUrl()
-        val response = httpClient.get("$base/bars/$barId/inventory/ingredients/$ingredientId/extra")
+        val response = httpClient.get("$base/bars/$barId/inventory/ingredients/$ingredientId/extra") {
+            header(HEADER_BAR_ID, barId.toString())
+        }
         return response.decodeSuccess<DataEnvelope<List<CocktailBasicDto>>>().data
     }
 
-    override suspend fun getShoppingList(userId: Int): List<ShoppingListItemDto> {
+    override suspend fun getShoppingList(barId: Int, userId: Int): List<ShoppingListItemDto> {
         val base = requireApiBaseUrl()
-        val response = httpClient.get("$base/members/$userId/shopping-list")
+        val response = httpClient.get("$base/members/$userId/shopping-list") {
+            header(HEADER_BAR_ID, barId.toString())
+        }
         return response.decodeSuccess<DataEnvelope<List<ShoppingListItemDto>>>().data
     }
 
     override suspend fun addToShoppingList(
+        barId: Int,
         userId: Int,
         items: List<ShoppingListIngredientInputDto>,
     ) {
@@ -451,10 +472,15 @@ class KtorBarAssistantApi(
                 ShoppingListBatchStoreRequestDto.serializer(),
                 ShoppingListBatchStoreRequestDto(items),
             ),
+            barId = barId,
         )
     }
 
-    override suspend fun removeFromShoppingList(userId: Int, ingredientIds: List<Int>) {
+    override suspend fun removeFromShoppingList(
+        barId: Int,
+        userId: Int,
+        ingredientIds: List<Int>,
+    ) {
         val base = requireApiBaseUrl()
         postJson(
             url = "$base/members/$userId/shopping-list/batch-delete",
@@ -464,11 +490,15 @@ class KtorBarAssistantApi(
                     ingredientIds.map { ShoppingListIngredientIdDto(it) },
                 ),
             ),
+            barId = barId,
         )
     }
 
-    private suspend fun postJson(url: String, bodyJson: String) {
+    private suspend fun postJson(url: String, bodyJson: String, barId: Int? = null) {
         val response = httpClient.post(url) {
+            if (barId != null) {
+                header(HEADER_BAR_ID, barId.toString())
+            }
             setBody(TextContent(bodyJson, ContentType.Application.Json))
         }
         if (!response.status.isSuccess()) {

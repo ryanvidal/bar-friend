@@ -12,9 +12,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+data class DetailSnackbarEvent(
+    val id: Long,
+    val message: String,
+)
 
 data class CocktailDetailUiState(
     val cocktail: CocktailDetail? = null,
@@ -31,8 +37,11 @@ data class CocktailDetailUiState(
     val shoppingListIngredientIds: Set<Int> = emptySet(),
     val shoppingListInFlightIds: Set<Int> = emptySet(),
     val isAddingMissingToShoppingList: Boolean = false,
-    val snackbarMessage: String? = null,
-)
+    val snackbarEvent: DetailSnackbarEvent? = null,
+) {
+    val snackbarMessage: String?
+        get() = snackbarEvent?.message
+}
 
 private data class DetailInteractionState(
     val unitOverride: VolumeUnit? = null,
@@ -45,10 +54,9 @@ private data class DetailInteractionState(
     val deleted: Boolean = false,
     val initialRefreshDone: Boolean = false,
     val refreshError: String? = null,
-    val actionError: String? = null,
     val shoppingListInFlightIds: Set<Int> = emptySet(),
     val isAddingMissingToShoppingList: Boolean = false,
-    val snackbarMessage: String? = null,
+    val snackbarEvent: DetailSnackbarEvent? = null,
 )
 
 class CocktailDetailViewModel(
@@ -58,6 +66,7 @@ class CocktailDetailViewModel(
     private val appPreferences: AppPreferences,
 ) : ViewModel() {
     private val interaction = MutableStateFlow(DetailInteractionState())
+    private var nextSnackbarId = 1L
 
     val uiState: StateFlow<CocktailDetailUiState> = combine(
         cocktailRepository.observeCocktailDetail(cocktailId),
@@ -65,8 +74,7 @@ class CocktailDetailViewModel(
         inventoryRepository.observeShoppingListIds(),
         interaction,
     ) { cocktail, settings, shoppingListIds, local ->
-        val effectiveError = local.actionError
-            ?: if (cocktail == null) local.refreshError else null
+        val effectiveError = if (cocktail == null) local.refreshError else null
         val boundedCheckedSteps = if (cocktail != null) {
             val validIndices = parseInstructionSteps(cocktail.instructions).indices
             local.checkedSteps.filterTo(HashSet()) { it in validIndices }
@@ -88,7 +96,7 @@ class CocktailDetailViewModel(
             shoppingListIngredientIds = shoppingListIds,
             shoppingListInFlightIds = local.shoppingListInFlightIds,
             isAddingMissingToShoppingList = local.isAddingMissingToShoppingList,
-            snackbarMessage = local.snackbarMessage,
+            snackbarEvent = local.snackbarEvent,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -115,7 +123,7 @@ class CocktailDetailViewModel(
                     current.copy(
                         isRefreshing = false,
                         initialRefreshDone = true,
-                        refreshError = result.exceptionOrNull()?.message,
+                        refreshError = result.exceptionOrNull()?.message?.takeIf { it.isNotBlank() },
                     )
                 }
             } catch (e: CancellationException) {
@@ -125,7 +133,7 @@ class CocktailDetailViewModel(
                     current.copy(
                         isRefreshing = false,
                         initialRefreshDone = true,
-                        refreshError = e.message,
+                        refreshError = e.message?.takeIf { it.isNotBlank() },
                     )
                 }
             }
@@ -167,10 +175,16 @@ class CocktailDetailViewModel(
         viewModelScope.launch {
             try {
                 cocktailRepository.toggleFavorite(cocktailId).onFailure { error ->
-                    interaction.update {
-                        it.copy(actionError = error.message ?: "Unable to update favorite status.")
-                    }
+                    emitSnackbar(
+                        error.message?.takeIf { it.isNotBlank() } ?: "Unable to update favorite status.",
+                    )
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emitSnackbar(
+                    e.message?.takeIf { it.isNotBlank() } ?: "Unable to update favorite status.",
+                )
             } finally {
                 interaction.update { it.copy(isTogglingFavorite = false) }
             }
@@ -181,7 +195,7 @@ class CocktailDetailViewModel(
         while (true) {
             val current = interaction.value
             if (current.isDeleting || current.deleted) return
-            if (interaction.compareAndSet(current, current.copy(isDeleting = true, actionError = null))) {
+            if (interaction.compareAndSet(current, current.copy(isDeleting = true))) {
                 break
             }
         }
@@ -192,22 +206,14 @@ class CocktailDetailViewModel(
                         interaction.update { it.copy(isDeleting = false, deleted = true) }
                     }
                     .onFailure { error ->
-                        interaction.update {
-                            it.copy(
-                                isDeleting = false,
-                                actionError = error.message ?: "Unable to delete recipe.",
-                            )
-                        }
+                        val message = error.message?.takeIf { it.isNotBlank() } ?: "Unable to delete recipe."
+                        interaction.update { it.copy(isDeleting = false).withSnackbar(message) }
                     }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                interaction.update {
-                    it.copy(
-                        isDeleting = false,
-                        actionError = e.message ?: "Unable to delete recipe.",
-                    )
-                }
+                val message = e.message?.takeIf { it.isNotBlank() } ?: "Unable to delete recipe."
+                interaction.update { it.copy(isDeleting = false).withSnackbar(message) }
             }
         }
     }
@@ -215,22 +221,28 @@ class CocktailDetailViewModel(
     fun toggleIngredientInShoppingList(ingredientId: Int, ingredientName: String) {
         while (true) {
             val current = interaction.value
-            if (ingredientId in current.shoppingListInFlightIds) return
+            if (
+                current.isDeleting ||
+                current.deleted ||
+                current.isAddingMissingToShoppingList ||
+                ingredientId in current.shoppingListInFlightIds
+            ) {
+                return
+            }
             if (
                 interaction.compareAndSet(
                     current,
-                    current.copy(
-                        shoppingListInFlightIds = current.shoppingListInFlightIds + ingredientId,
-                        actionError = null,
-                    ),
+                    current.copy(shoppingListInFlightIds = current.shoppingListInFlightIds + ingredientId),
                 )
             ) {
                 break
             }
         }
-        val isCurrentlyInList = ingredientId in uiState.value.shoppingListIngredientIds
         viewModelScope.launch {
+            var isCurrentlyInList = false
             try {
+                val currentShoppingIds = inventoryRepository.observeShoppingListIds().first()
+                isCurrentlyInList = ingredientId in currentShoppingIds
                 val result = if (isCurrentlyInList) {
                     inventoryRepository.removeFromShoppingList(listOf(ingredientId))
                 } else {
@@ -243,7 +255,7 @@ class CocktailDetailViewModel(
                         } else {
                             "Added $ingredientName to shopping list"
                         }
-                        interaction.update { it.copy(snackbarMessage = message) }
+                        emitSnackbar(message)
                     }
                     .onFailure { error ->
                         val fallback = if (isCurrentlyInList) {
@@ -251,9 +263,7 @@ class CocktailDetailViewModel(
                         } else {
                             "Unable to add $ingredientName to shopping list."
                         }
-                        interaction.update {
-                            it.copy(actionError = error.message ?: fallback)
-                        }
+                        emitSnackbar(error.message?.takeIf { it.isNotBlank() } ?: fallback)
                     }
             } catch (e: CancellationException) {
                 throw e
@@ -263,9 +273,7 @@ class CocktailDetailViewModel(
                 } else {
                     "Unable to add $ingredientName to shopping list."
                 }
-                interaction.update {
-                    it.copy(actionError = e.message ?: fallback)
-                }
+                emitSnackbar(e.message?.takeIf { it.isNotBlank() } ?: fallback)
             } finally {
                 interaction.update {
                     it.copy(shoppingListInFlightIds = it.shoppingListInFlightIds - ingredientId)
@@ -275,32 +283,20 @@ class CocktailDetailViewModel(
     }
 
     fun addMissingIngredientsToShoppingList() {
-        if (interaction.value.isAddingMissingToShoppingList) return
-        val cocktail = uiState.value.cocktail ?: return
-        val missingRequiredIds = cocktail.ingredients
-            .asSequence()
-            .filter { !it.optional && !it.isAvailableInBar }
-            .map { it.ingredientId }
-            .distinct()
-            .toList()
-        if (missingRequiredIds.isEmpty()) return
-
-        val alreadyListed = uiState.value.shoppingListIngredientIds
-        val missingIds = missingRequiredIds.filterNot { it in alreadyListed }
-        if (missingIds.isEmpty()) {
-            interaction.update {
-                it.copy(snackbarMessage = "All missing ingredients are already on your shopping list")
-            }
-            return
-        }
-
         while (true) {
             val current = interaction.value
-            if (current.isAddingMissingToShoppingList) return
+            if (
+                current.isDeleting ||
+                current.deleted ||
+                current.isAddingMissingToShoppingList ||
+                current.shoppingListInFlightIds.isNotEmpty()
+            ) {
+                return
+            }
             if (
                 interaction.compareAndSet(
                     current,
-                    current.copy(isAddingMissingToShoppingList = true, actionError = null),
+                    current.copy(isAddingMissingToShoppingList = true),
                 )
             ) {
                 break
@@ -308,29 +304,44 @@ class CocktailDetailViewModel(
         }
         viewModelScope.launch {
             try {
+                val cocktail = cocktailRepository.observeCocktailDetail(cocktailId).first() ?: return@launch
+                val missingRequiredIds = cocktail.ingredients
+                    .asSequence()
+                    .filter { !it.optional && !it.isAvailableInBar }
+                    .map { it.ingredientId }
+                    .distinct()
+                    .toList()
+                if (missingRequiredIds.isEmpty()) return@launch
+
+                val alreadyListed = inventoryRepository.observeShoppingListIds().first()
+                val missingIds = missingRequiredIds.filterNot { it in alreadyListed }
+                if (missingIds.isEmpty()) {
+                    emitSnackbar("All missing ingredients are already on your shopping list")
+                    return@launch
+                }
+
                 inventoryRepository.addToShoppingList(missingIds)
                     .onSuccess {
-                        interaction.update {
-                            it.copy(
-                                snackbarMessage = "Added ${missingIds.size} ingredient(s) to shopping list",
-                            )
+                        val message = if (missingIds.size == 1) {
+                            "Added 1 ingredient to shopping list"
+                        } else {
+                            "Added ${missingIds.size} ingredients to shopping list"
                         }
+                        emitSnackbar(message)
                     }
                     .onFailure { error ->
-                        interaction.update {
-                            it.copy(
-                                actionError = error.message ?: "Unable to add missing ingredients to shopping list.",
-                            )
-                        }
+                        emitSnackbar(
+                            error.message?.takeIf { it.isNotBlank() }
+                                ?: "Unable to add missing ingredients to shopping list.",
+                        )
                     }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                interaction.update {
-                    it.copy(
-                        actionError = e.message ?: "Unable to add missing ingredients to shopping list.",
-                    )
-                }
+                emitSnackbar(
+                    e.message?.takeIf { it.isNotBlank() }
+                        ?: "Unable to add missing ingredients to shopping list.",
+                )
             } finally {
                 interaction.update { it.copy(isAddingMissingToShoppingList = false) }
             }
@@ -341,11 +352,27 @@ class CocktailDetailViewModel(
         interaction.update { it.copy(deleted = false) }
     }
 
-    fun consumeSnackbar() {
-        interaction.update { it.copy(snackbarMessage = null) }
+    fun consumeSnackbar(eventId: Long) {
+        interaction.update { current ->
+            if (current.snackbarEvent?.id == eventId) {
+                current.copy(snackbarEvent = null)
+            } else {
+                current
+            }
+        }
     }
 
     fun clearError() {
-        interaction.update { it.copy(actionError = null, refreshError = null) }
+        interaction.update { it.copy(refreshError = null) }
+    }
+
+    private fun DetailInteractionState.withSnackbar(message: String): DetailInteractionState {
+        val nextId = maxOf(nextSnackbarId, (snackbarEvent?.id ?: 0L) + 1L)
+        nextSnackbarId = nextId + 1L
+        return copy(snackbarEvent = DetailSnackbarEvent(id = nextId, message = message))
+    }
+
+    private fun emitSnackbar(message: String) {
+        interaction.update { it.withSnackbar(message) }
     }
 }

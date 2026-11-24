@@ -1,6 +1,7 @@
 package com.ryanvidal.barfriend.feature.inventory
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -21,8 +22,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -85,6 +88,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -119,14 +124,7 @@ fun InventoryScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-
-    LaunchedEffect(uiState.snackbarMessage) {
-        val message = uiState.snackbarMessage
-        if (message != null) {
-            snackbarHostState.showSnackbar(message)
-            viewModel.consumeSnackbar()
-        }
-    }
+    val sheetSnackbarHostState = remember { SnackbarHostState() }
 
     InventoryContent(
         uiState = uiState,
@@ -148,7 +146,9 @@ fun InventoryScreen(
         onOpenUnlockedCocktails = viewModel::openUnlockedCocktails,
         onDismissUnlockedCocktails = viewModel::dismissUnlockedCocktails,
         onOpenCocktail = onOpenCocktail,
+        onConsumeSnackbar = viewModel::consumeSnackbar,
         snackbarHostState = snackbarHostState,
+        sheetSnackbarHostState = sheetSnackbarHostState,
         modifier = modifier,
     )
 }
@@ -165,7 +165,7 @@ fun InventoryContent(
     onRefresh: () -> Unit,
     onRetryRecommendations: () -> Unit,
     onToggleBarShelf: (Int, Boolean) -> Unit,
-    onToggleShoppingList: (Int) -> Unit,
+    onToggleShoppingList: (Int, Boolean) -> Unit,
     onAddToShoppingList: (Int) -> Unit,
     onUpdateQuantity: (Int, Int) -> Unit,
     onRemoveFromShoppingList: (Int) -> Unit,
@@ -176,11 +176,38 @@ fun InventoryContent(
     onDismissUnlockedCocktails: () -> Unit,
     onOpenCocktail: (Int) -> Unit,
     modifier: Modifier = Modifier,
+    onConsumeSnackbar: (Long) -> Unit = {},
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+    sheetSnackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
 ) {
     var showAddShoppingSheet by rememberSaveable { mutableStateOf(false) }
     var showMoveAllDialog by rememberSaveable { mutableStateOf(false) }
     var showClearShoppingDialog by rememberSaveable { mutableStateOf(false) }
+
+    val shelfListState = rememberLazyListState()
+    val recommendationsListState = rememberLazyListState()
+    val stockFilterScrollState = rememberScrollState()
+    val categoryFilterScrollState = rememberScrollState()
+    val shoppingListState = rememberLazyListState()
+
+    val isSheetOpen = showAddShoppingSheet || uiState.unlockedSheet != null
+
+    LaunchedEffect(uiState.snackbarEvent?.id, isSheetOpen) {
+        val event = uiState.snackbarEvent ?: return@LaunchedEffect
+        val targetHostState = if (isSheetOpen) sheetSnackbarHostState else snackbarHostState
+        try {
+            targetHostState.showSnackbar(event.message)
+        } finally {
+            onConsumeSnackbar(event.id)
+        }
+    }
+
+    LaunchedEffect(uiState.shoppingList.isEmpty()) {
+        if (uiState.shoppingList.isEmpty()) {
+            showMoveAllDialog = false
+            showClearShoppingDialog = false
+        }
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -216,6 +243,7 @@ fun InventoryContent(
                                     text = tab.label,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
                                 )
                                 if (tab == InventoryTab.SHOPPING_LIST && uiState.shoppingList.isNotEmpty()) {
                                     Badge { Text(uiState.shoppingList.size.toString()) }
@@ -237,6 +265,10 @@ fun InventoryContent(
             when (uiState.selectedTab) {
                 InventoryTab.BAR_SHELF -> BarShelfTabContent(
                     uiState = uiState,
+                    shelfListState = shelfListState,
+                    recommendationsListState = recommendationsListState,
+                    stockFilterScrollState = stockFilterScrollState,
+                    categoryFilterScrollState = categoryFilterScrollState,
                     onSearchQueryChanged = onSearchQueryChanged,
                     onSelectStockFilter = onSelectStockFilter,
                     onSelectCategory = onSelectCategory,
@@ -253,6 +285,7 @@ fun InventoryContent(
 
                 InventoryTab.SHOPPING_LIST -> ShoppingListTabContent(
                     uiState = uiState,
+                    listState = shoppingListState,
                     onRefresh = onRefresh,
                     onOpenAddSheet = { showAddShoppingSheet = true },
                     onRequestMoveAll = { showMoveAllDialog = true },
@@ -276,6 +309,7 @@ fun InventoryContent(
             inFlightPurchaseIds = uiState.inFlightPurchaseIds,
             isBulkUpdating = uiState.isBulkUpdating,
             lastSyncedEpochMillis = uiState.syncStatus.lastSyncedEpochMillis,
+            snackbarHostState = sheetSnackbarHostState,
             onDismiss = { showAddShoppingSheet = false },
             onAddIngredient = onAddToShoppingList,
         )
@@ -288,6 +322,7 @@ fun InventoryContent(
             inFlightShoppingIds = uiState.inFlightShoppingIds,
             inFlightPurchaseIds = uiState.inFlightPurchaseIds,
             isBulkUpdating = uiState.isBulkUpdating,
+            snackbarHostState = sheetSnackbarHostState,
             onDismiss = onDismissUnlockedCocktails,
             onToggleBarShelf = onToggleBarShelf,
             onToggleShoppingList = onToggleShoppingList,
@@ -299,7 +334,7 @@ fun InventoryContent(
         )
     }
 
-    if (showMoveAllDialog) {
+    if (showMoveAllDialog && uiState.shoppingList.isNotEmpty()) {
         val count = uiState.shoppingList.size
         AlertDialog(
             onDismissRequest = { showMoveAllDialog = false },
@@ -315,6 +350,7 @@ fun InventoryContent(
                         showMoveAllDialog = false
                         onMarkAllPurchased()
                     },
+                    enabled = !uiState.isBulkUpdating && !uiState.hasInFlightItemMutations,
                 ) {
                     Text("Move All")
                 }
@@ -327,7 +363,7 @@ fun InventoryContent(
         )
     }
 
-    if (showClearShoppingDialog) {
+    if (showClearShoppingDialog && uiState.shoppingList.isNotEmpty()) {
         val count = uiState.shoppingList.size
         AlertDialog(
             onDismissRequest = { showClearShoppingDialog = false },
@@ -343,6 +379,7 @@ fun InventoryContent(
                         showClearShoppingDialog = false
                         onClearShoppingList()
                     },
+                    enabled = !uiState.isBulkUpdating && !uiState.hasInFlightItemMutations,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.error,
                         contentColor = MaterialTheme.colorScheme.onError,
@@ -364,6 +401,10 @@ fun InventoryContent(
 @Composable
 private fun BarShelfTabContent(
     uiState: InventoryUiState,
+    shelfListState: LazyListState,
+    recommendationsListState: LazyListState,
+    stockFilterScrollState: ScrollState,
+    categoryFilterScrollState: ScrollState,
     onSearchQueryChanged: (String) -> Unit,
     onSelectStockFilter: (ShelfStockFilter) -> Unit,
     onSelectCategory: (String?) -> Unit,
@@ -371,7 +412,7 @@ private fun BarShelfTabContent(
     onRefresh: () -> Unit,
     onRetryRecommendations: () -> Unit,
     onToggleBarShelf: (Int, Boolean) -> Unit,
-    onToggleShoppingList: (Int) -> Unit,
+    onToggleShoppingList: (Int, Boolean) -> Unit,
     onOpenUnlockedCocktails: (Int, String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -433,7 +474,7 @@ private fun BarShelfTabContent(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
+                .horizontalScroll(stockFilterScrollState)
                 .padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -451,7 +492,7 @@ private fun BarShelfTabContent(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
+                    .horizontalScroll(categoryFilterScrollState)
                     .padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -475,6 +516,7 @@ private fun BarShelfTabContent(
         val showRecommendations = uiState.searchQuery.isBlank() &&
             uiState.selectedCategory == null &&
             uiState.stockFilter != ShelfStockFilter.IN_STOCK &&
+            uiState.allIngredients.isNotEmpty() &&
             (uiState.recommendations.isNotEmpty() || uiState.isLoadingRecommendations)
 
         val showRecommendationError = uiState.searchQuery.isBlank() &&
@@ -533,6 +575,7 @@ private fun BarShelfTabContent(
 
                 else -> {
                     LazyColumn(
+                        state = shelfListState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(top = 6.dp, bottom = 24.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -576,6 +619,7 @@ private fun BarShelfTabContent(
                                     }
                                 } else {
                                     LazyRow(
+                                        state = recommendationsListState,
                                         contentPadding = PaddingValues(horizontal = 16.dp),
                                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                                     ) {
@@ -597,7 +641,9 @@ private fun BarShelfTabContent(
                                                     onOpenUnlockedCocktails(recommendation.id, recommendation.name)
                                                 },
                                                 onAddToShelf = { onToggleBarShelf(recommendation.id, true) },
-                                                onToggleShoppingList = { onToggleShoppingList(recommendation.id) },
+                                                onToggleShoppingList = {
+                                                    onToggleShoppingList(recommendation.id, !recommendation.inShoppingList)
+                                                },
                                             )
                                         }
                                     }
@@ -668,7 +714,9 @@ private fun BarShelfTabContent(
                                     onRowClick = {
                                         onOpenUnlockedCocktails(ingredient.id, ingredient.name)
                                     },
-                                    onToggleShoppingList = { onToggleShoppingList(ingredient.id) },
+                                    onToggleShoppingList = {
+                                        onToggleShoppingList(ingredient.id, !ingredient.inShoppingList)
+                                    },
                                     onToggleBarShelf = { inStock ->
                                         onToggleBarShelf(ingredient.id, inStock)
                                     },
@@ -799,7 +847,7 @@ private fun IngredientShelfRow(
     val metaText = remember(ingredient.categoryName, ingredient.strength) {
         listOfNotNull(
             ingredient.categoryName?.takeIf { it.isNotBlank() },
-            ingredient.strength.takeIf { it > 0.0 }?.let(::formatStrengthAbv),
+            ingredient.strength.takeIf { it > 0.0 }?.let(::formatStrengthAbv)?.takeIf { it.isNotEmpty() },
         ).joinToString(" · ")
     }
 
@@ -814,7 +862,11 @@ private fun IngredientShelfRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(enabled = !ingredient.inBarShelf, onClick = onRowClick)
+                .clickable(
+                    enabled = !ingredient.inBarShelf,
+                    onClickLabel = "Inspect unlocked cocktails",
+                    onClick = onRowClick,
+                )
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -875,6 +927,9 @@ private fun IngredientShelfRow(
                 checked = ingredient.inBarShelf,
                 onCheckedChange = onToggleBarShelf,
                 enabled = !isShelfBusy,
+                modifier = Modifier.semantics {
+                    contentDescription = "${ingredient.name} in bar shelf"
+                },
             )
         }
     }
@@ -884,6 +939,7 @@ private fun IngredientShelfRow(
 @Composable
 private fun ShoppingListTabContent(
     uiState: InventoryUiState,
+    listState: LazyListState,
     onRefresh: () -> Unit,
     onOpenAddSheet: () -> Unit,
     onRequestMoveAll: () -> Unit,
@@ -917,7 +973,7 @@ private fun ShoppingListTabContent(
                 if (uiState.shoppingList.isNotEmpty()) {
                     FilledTonalButton(
                         onClick = onRequestMoveAll,
-                        enabled = !uiState.isBulkUpdating,
+                        enabled = !uiState.isBulkUpdating && !uiState.hasInFlightItemMutations,
                         modifier = Modifier.heightIn(min = 48.dp),
                     ) {
                         Text("Move All to Shelf")
@@ -925,7 +981,7 @@ private fun ShoppingListTabContent(
 
                     TextButton(
                         onClick = onRequestClear,
-                        enabled = !uiState.isBulkUpdating,
+                        enabled = !uiState.isBulkUpdating && !uiState.hasInFlightItemMutations,
                         colors = ButtonDefaults.textButtonColors(
                             contentColor = MaterialTheme.colorScheme.error,
                         ),
@@ -954,6 +1010,7 @@ private fun ShoppingListTabContent(
                 }
             } else {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxSize()
                         .weight(1f),
@@ -964,15 +1021,16 @@ private fun ShoppingListTabContent(
                         items = uiState.shoppingList,
                         key = { it.ingredientId },
                     ) { item ->
+                        val isPurchaseBusy = item.ingredientId in uiState.inFlightPurchaseIds
                         val isBusy = item.ingredientId in uiState.inFlightShoppingIds ||
-                            item.ingredientId in uiState.inFlightPurchaseIds ||
+                            isPurchaseBusy ||
                             uiState.isBulkUpdating
-                        val isPurchasing = item.ingredientId in uiState.inFlightPurchaseIds
                         ShoppingListCard(
                             item = item,
                             lastSyncedEpochMillis = uiState.syncStatus.lastSyncedEpochMillis,
                             isBusy = isBusy,
-                            isPurchasing = isPurchasing,
+                            isPurchaseBusy = isPurchaseBusy,
+                            isBulkUpdating = uiState.isBulkUpdating,
                             onDecrement = { onUpdateQuantity(item.ingredientId, item.quantity - 1) },
                             onIncrement = { onUpdateQuantity(item.ingredientId, item.quantity + 1) },
                             onMarkPurchased = { onMarkPurchased(item.ingredientId) },
@@ -990,7 +1048,8 @@ private fun ShoppingListCard(
     item: ShoppingListItem,
     lastSyncedEpochMillis: Long?,
     isBusy: Boolean,
-    isPurchasing: Boolean,
+    isPurchaseBusy: Boolean,
+    isBulkUpdating: Boolean,
     onDecrement: () -> Unit,
     onIncrement: () -> Unit,
     onMarkPurchased: () -> Unit,
@@ -1067,7 +1126,7 @@ private fun ShoppingListCard(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(
                             onClick = onDecrement,
-                            enabled = !isBusy,
+                            enabled = !isPurchaseBusy && !isBulkUpdating,
                             modifier = Modifier.size(48.dp),
                         ) {
                             Icon(
@@ -1090,7 +1149,7 @@ private fun ShoppingListCard(
 
                         IconButton(
                             onClick = onIncrement,
-                            enabled = !isBusy,
+                            enabled = !isPurchaseBusy && !isBulkUpdating,
                             modifier = Modifier.size(48.dp),
                         ) {
                             Icon(
@@ -1107,7 +1166,7 @@ private fun ShoppingListCard(
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                     modifier = Modifier.heightIn(min = 48.dp),
                 ) {
-                    if (isPurchasing) {
+                    if (isPurchaseBusy) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,
@@ -1136,9 +1195,11 @@ private fun AddShoppingItemSheet(
     inFlightPurchaseIds: Set<Int>,
     isBulkUpdating: Boolean,
     lastSyncedEpochMillis: Long?,
+    snackbarHostState: SnackbarHostState,
     onDismiss: () -> Unit,
     onAddIngredient: (Int) -> Unit,
 ) {
+    val focusManager = LocalFocusManager.current
     val readyColor = LocalBarFriendStatusColors.current.ready
     var query by rememberSaveable { mutableStateOf("") }
     val shoppingIds = remember(shoppingList) {
@@ -1160,140 +1221,154 @@ private fun AddShoppingItemSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .imePadding()
-                .heightIn(min = 320.dp, max = 560.dp)
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .imePadding(),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 560.dp)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(
-                    text = "Add to Shopping List",
-                    style = MaterialTheme.typography.titleLarge,
-                )
-                TextButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.heightIn(min = 48.dp),
-                ) {
-                    Text("Done")
-                }
-            }
-
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                placeholder = { Text("Search catalog ingredients") },
-                leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
-                trailingIcon = {
-                    if (query.isNotEmpty()) {
-                        IconButton(onClick = { query = "" }) {
-                            Icon(Icons.Rounded.Close, contentDescription = "Clear search")
-                        }
-                    }
-                },
-                singleLine = true,
-                shape = MaterialTheme.shapes.large,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            if (availableIngredients.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center,
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(
-                        text = when {
-                            allIngredients.isEmpty() -> "Sync your bar catalog first to browse ingredients."
-                            query.isBlank() -> "All catalog ingredients are already on your shopping list."
-                            else -> "No ingredients match \"$query\"."
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
+                        text = "Add to Shopping List",
+                        style = MaterialTheme.typography.titleLarge,
                     )
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) {
+                        Text("Done")
+                    }
                 }
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentPadding = PaddingValues(bottom = 16.dp),
-                ) {
-                    items(
-                        items = availableIngredients,
-                        key = { it.id },
-                    ) { ingredient ->
-                        val isBusy = ingredient.id in inFlightShoppingIds ||
-                            ingredient.id in inFlightPurchaseIds ||
-                            isBulkUpdating
-                        ListItem(
-                            headlineContent = { Text(ingredient.name) },
-                            supportingContent = {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    ingredient.categoryName?.takeIf { it.isNotBlank() }?.let { category ->
-                                        Text(category)
+
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Search catalog ingredients") },
+                    leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                    trailingIcon = {
+                        if (query.isNotEmpty()) {
+                            IconButton(onClick = { query = "" }) {
+                                Icon(Icons.Rounded.Close, contentDescription = "Clear search")
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
+                    shape = MaterialTheme.shapes.large,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                if (availableIngredients.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false)
+                            .padding(vertical = 24.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = when {
+                                allIngredients.isEmpty() -> "Sync your bar catalog first to browse ingredients."
+                                query.isBlank() -> "All catalog ingredients are already on your shopping list."
+                                else -> "No ingredients match \"$query\"."
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false),
+                        contentPadding = PaddingValues(bottom = 16.dp),
+                    ) {
+                        items(
+                            items = availableIngredients,
+                            key = { it.id },
+                        ) { ingredient ->
+                            val isBusy = ingredient.id in inFlightShoppingIds ||
+                                ingredient.id in inFlightPurchaseIds ||
+                                isBulkUpdating
+                            ListItem(
+                                headlineContent = { Text(ingredient.name) },
+                                supportingContent = {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        ingredient.categoryName?.takeIf { it.isNotBlank() }?.let { category ->
+                                            Text(category)
+                                        }
+                                        if (ingredient.inBarShelf) {
+                                            Surface(
+                                                shape = MaterialTheme.shapes.small,
+                                                color = readyColor.copy(alpha = 0.16f),
+                                            ) {
+                                                Text(
+                                                    text = "In Shelf",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = readyColor,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                )
+                                            }
+                                        }
                                     }
-                                    if (ingredient.inBarShelf) {
-                                        Surface(
-                                            shape = MaterialTheme.shapes.small,
-                                            color = readyColor.copy(alpha = 0.16f),
+                                },
+                                leadingContent = {
+                                    IngredientThumbnail(
+                                        thumbUrl = ingredient.mainImageThumbUrl,
+                                        lastSyncedEpochMillis = lastSyncedEpochMillis,
+                                        size = 40.dp,
+                                    )
+                                },
+                                trailingContent = {
+                                    if (ingredient.id in inFlightShoppingIds) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(20.dp),
+                                            strokeWidth = 2.dp,
+                                        )
+                                    } else {
+                                        IconButton(
+                                            onClick = { onAddIngredient(ingredient.id) },
+                                            enabled = !isBusy,
+                                            modifier = Modifier.size(48.dp),
                                         ) {
-                                            Text(
-                                                text = "In Shelf",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = readyColor,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            Icon(
+                                                imageVector = Icons.Rounded.AddShoppingCart,
+                                                contentDescription = "Add ${ingredient.name} to shopping list",
+                                                tint = MaterialTheme.colorScheme.primary,
                                             )
                                         }
                                     }
-                                }
-                            },
-                            leadingContent = {
-                                IngredientThumbnail(
-                                    thumbUrl = ingredient.mainImageThumbUrl,
-                                    lastSyncedEpochMillis = lastSyncedEpochMillis,
-                                    size = 40.dp,
-                                )
-                            },
-                            trailingContent = {
-                                if (ingredient.id in inFlightShoppingIds) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(20.dp),
-                                        strokeWidth = 2.dp,
-                                    )
-                                } else {
-                                    IconButton(
-                                        onClick = { onAddIngredient(ingredient.id) },
-                                        enabled = !isBusy,
-                                        modifier = Modifier.size(48.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.AddShoppingCart,
-                                            contentDescription = "Add ${ingredient.name} to shopping list",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                        )
-                                    }
-                                }
-                            },
-                            modifier = Modifier.clickable(enabled = !isBusy) {
-                                onAddIngredient(ingredient.id)
-                            },
-                        )
+                                },
+                                modifier = Modifier.clickable(enabled = !isBusy) {
+                                    onAddIngredient(ingredient.id)
+                                },
+                            )
+                        }
                     }
                 }
             }
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
         }
     }
 }
@@ -1306,9 +1381,10 @@ private fun UnlockedCocktailsSheet(
     inFlightShoppingIds: Set<Int>,
     inFlightPurchaseIds: Set<Int>,
     isBulkUpdating: Boolean,
+    snackbarHostState: SnackbarHostState,
     onDismiss: () -> Unit,
     onToggleBarShelf: (Int, Boolean) -> Unit,
-    onToggleShoppingList: (Int) -> Unit,
+    onToggleShoppingList: (Int, Boolean) -> Unit,
     onRetry: () -> Unit,
     onOpenCocktail: (Int) -> Unit,
 ) {
@@ -1324,211 +1400,229 @@ private fun UnlockedCocktailsSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 280.dp, max = 560.dp)
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    text = sheet.ingredientName,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = if (sheet.inBarShelf) "In Bar Shelf" else "Not on Bar Shelf",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = if (sheet.inBarShelf) readyColor else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 280.dp, max = 560.dp)
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                if (sheet.inBarShelf) {
-                    FilledTonalButton(
-                        onClick = { onToggleBarShelf(sheet.ingredientId, false) },
-                        enabled = !isShelfBusy,
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Check,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("In Bar Shelf")
-                    }
-                } else {
-                    Button(
-                        onClick = { onToggleBarShelf(sheet.ingredientId, true) },
-                        enabled = !isShelfBusy,
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Liquor,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Add to Bar Shelf")
-                    }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = sheet.ingredientName,
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = if (sheet.inBarShelf) "In Bar Shelf" else "Not on Bar Shelf",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (sheet.inBarShelf) readyColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
 
-                if (sheet.inShoppingList) {
-                    FilledTonalButton(
-                        onClick = { onToggleShoppingList(sheet.ingredientId) },
-                        enabled = !isShoppingBusy,
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.ShoppingCart,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("In Shopping List")
-                    }
-                } else {
-                    OutlinedButton(
-                        onClick = { onToggleShoppingList(sheet.ingredientId) },
-                        enabled = !isShoppingBusy,
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.AddShoppingCart,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Add to Shopping List")
-                    }
-                }
-            }
-
-            HorizontalDivider()
-
-            when {
-                sheet.isLoading -> {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f, fill = false)
-                            .padding(vertical = 28.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (sheet.inBarShelf) {
+                        FilledTonalButton(
+                            onClick = { onToggleBarShelf(sheet.ingredientId, false) },
+                            enabled = !isShelfBusy,
+                            modifier = Modifier.heightIn(min = 48.dp),
                         ) {
-                            CircularProgressIndicator()
+                            Icon(
+                                imageVector = Icons.Rounded.Check,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("In Bar Shelf")
+                        }
+                    } else {
+                        Button(
+                            onClick = { onToggleBarShelf(sheet.ingredientId, true) },
+                            enabled = !isShelfBusy,
+                            modifier = Modifier.heightIn(min = 48.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Liquor,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Add to Bar Shelf")
+                        }
+                    }
+
+                    if (sheet.inShoppingList) {
+                        FilledTonalButton(
+                            onClick = { onToggleShoppingList(sheet.ingredientId, false) },
+                            enabled = !isShoppingBusy,
+                            modifier = Modifier.heightIn(min = 48.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ShoppingCart,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("In Shopping List")
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = { onToggleShoppingList(sheet.ingredientId, true) },
+                            enabled = !isShoppingBusy,
+                            modifier = Modifier.heightIn(min = 48.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.AddShoppingCart,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Add to Shopping List")
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                when {
+                    sheet.isLoading -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f, fill = false)
+                                .verticalScroll(rememberScrollState())
+                                .padding(vertical = 28.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                CircularProgressIndicator()
+                                Text(
+                                    text = "Checking unlocked cocktails...",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+
+                    sheet.errorMessage != null -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f, fill = false)
+                                .verticalScroll(rememberScrollState())
+                                .padding(vertical = 16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
                             Text(
-                                text = "Checking unlocked cocktails...",
+                                text = sheet.errorMessage,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                                textAlign = TextAlign.Center,
+                            )
+                            OutlinedButton(
+                                onClick = onRetry,
+                                modifier = Modifier.heightIn(min = 48.dp),
+                            ) {
+                                Text("Retry")
+                            }
+                        }
+                    }
+
+                    sheet.cocktails.isEmpty() -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f, fill = false)
+                                .verticalScroll(rememberScrollState())
+                                .padding(vertical = 12.dp),
+                        ) {
+                            Text(
+                                text = if (sheet.inBarShelf) {
+                                    "No cocktails exclusively depend on this bottle right now."
+                                } else {
+                                    "No additional cocktails are unlocked by adding this ingredient alone."
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
-                }
 
-                sheet.errorMessage != null -> {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Text(
-                            text = sheet.errorMessage,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.error,
-                            textAlign = TextAlign.Center,
+                    else -> {
+                        SectionHeader(
+                            title = "Cocktails Unlocked (${sheet.cocktails.size})",
                         )
-                        OutlinedButton(
-                            onClick = onRetry,
-                            modifier = Modifier.heightIn(min = 48.dp),
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f, fill = false),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Text("Retry")
-                        }
-                    }
-                }
-
-                sheet.cocktails.isEmpty() -> {
-                    Text(
-                        text = if (sheet.inBarShelf) {
-                            "No cocktails exclusively depend on this bottle right now."
-                        } else {
-                            "No additional cocktails are unlocked by adding this ingredient alone."
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(vertical = 12.dp),
-                    )
-                }
-
-                else -> {
-                    SectionHeader(
-                        title = "Cocktails Unlocked (${sheet.cocktails.size})",
-                    )
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f, fill = false),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        items(
-                            items = sheet.cocktails,
-                            key = { it.id },
-                        ) { cocktail ->
-                            OutlinedCard(
-                                onClick = { onOpenCocktail(cocktail.id) },
-                                shape = MaterialTheme.shapes.medium,
-                                colors = CardDefaults.outlinedCardColors(
-                                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                                ),
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 56.dp),
-                            ) {
-                                Row(
+                            items(
+                                items = sheet.cocktails,
+                                key = { it.id },
+                            ) { cocktail ->
+                                OutlinedCard(
+                                    onClick = { onOpenCocktail(cocktail.id) },
+                                    shape = MaterialTheme.shapes.medium,
+                                    colors = CardDefaults.outlinedCardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                                    ),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        .heightIn(min = 56.dp),
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.LocalBar,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(20.dp),
-                                    )
-                                    Text(
-                                        text = cocktail.name,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.LocalBar,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(20.dp),
+                                        )
+                                        Text(
+                                            text = cocktail.name,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
         }
     }
 }
@@ -1717,7 +1811,7 @@ private fun InventoryPreviewHost(uiState: InventoryUiState) {
         onRefresh = {},
         onRetryRecommendations = {},
         onToggleBarShelf = { _, _ -> },
-        onToggleShoppingList = {},
+        onToggleShoppingList = { _, _ -> },
         onAddToShoppingList = {},
         onUpdateQuantity = { _, _ -> },
         onRemoveFromShoppingList = {},

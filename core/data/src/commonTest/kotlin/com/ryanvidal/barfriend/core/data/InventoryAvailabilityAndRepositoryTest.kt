@@ -4,7 +4,9 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import com.ryanvidal.barfriend.core.database.dao.CatalogDao
+import com.ryanvidal.barfriend.core.database.dao.CocktailAvailabilityUpdate
 import com.ryanvidal.barfriend.core.database.dao.CocktailDao
+import com.ryanvidal.barfriend.core.database.dao.CocktailIngredientAvailabilityUpdate
 import com.ryanvidal.barfriend.core.database.dao.CocktailWithIngredients
 import com.ryanvidal.barfriend.core.database.dao.InventoryDao
 import com.ryanvidal.barfriend.core.database.dao.SyncDao
@@ -28,6 +30,7 @@ import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.UnlockedCocktail
 import com.ryanvidal.barfriend.core.model.UploadedImage
 import com.ryanvidal.barfriend.core.network.BarAssistantApi
+import com.ryanvidal.barfriend.core.network.BarAssistantApiException
 import com.ryanvidal.barfriend.core.network.dto.BarDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailBasicDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailDto
@@ -146,17 +149,18 @@ class InventoryAvailabilityAndRepositoryTest {
             CocktailWithIngredients(entity, ings)
         }
 
-        val (updatedCocktails, updatedIngredients) = recalculateCocktailAvailability(
+        val firstRecalc = recalculateCocktailAvailability(
             items = initial,
             shelfIngredientIds = setOf(1, 20),
         )
+        val afterFirst = applyAvailabilityRecalculation(initial, firstRecalc)
 
-        val negroni = updatedCocktails.first { it.id == 1 }
-        assertTrue(negroni.inBarShelf)
-        assertEquals(0, negroni.missingIngredientsCount)
-        assertEquals("[]", negroni.missingIngredientNamesJson)
+        val negroni = afterFirst.first { it.cocktail.id == 1 }
+        assertTrue(negroni.cocktail.inBarShelf)
+        assertEquals(0, negroni.cocktail.missingIngredientsCount)
+        assertEquals("[]", negroni.cocktail.missingIngredientNamesJson)
 
-        val negroniIngredients = updatedIngredients.filter { it.cocktailId == 1 }.sortedBy { it.sort }
+        val negroniIngredients = negroni.ingredients.sortedBy { it.sort }
         assertTrue(negroniIngredients[0].inBarShelf)
         assertFalse(negroniIngredients[1].inBarShelf)
         assertTrue(negroniIngredients[1].inBarShelfAsSubstitute)
@@ -164,26 +168,95 @@ class InventoryAvailabilityAndRepositoryTest {
         assertTrue(negroniIngredients[2].inBarShelfAsVariant)
         assertFalse(negroniIngredients[3].inBarShelf)
 
-        val daiquiri = updatedCocktails.first { it.id == 2 }
-        assertFalse(daiquiri.inBarShelf)
-        assertEquals(1, daiquiri.missingIngredientsCount)
-        assertEquals("""["White Rum"]""", daiquiri.missingIngredientNamesJson)
-        assertTrue(updatedIngredients.first { it.cocktailId == 2 && it.ingredientId == 6 }.inBarShelfAsComplex)
+        val daiquiri = afterFirst.first { it.cocktail.id == 2 }
+        assertFalse(daiquiri.cocktail.inBarShelf)
+        assertEquals(1, daiquiri.cocktail.missingIngredientsCount)
+        assertEquals("""["White Rum"]""", daiquiri.cocktail.missingIngredientNamesJson)
+        assertTrue(daiquiri.ingredients.first { it.ingredientId == 6 }.inBarShelfAsComplex)
 
-        val afterRemove = listOf(
-            CocktailWithIngredients(negroni, negroniIngredients),
-        )
-        val (revertedCocktails, revertedIngredients) = recalculateCocktailAvailability(
-            items = afterRemove,
+        val revertRecalc = recalculateCocktailAvailability(
+            items = listOf(negroni),
             shelfIngredientIds = setOf(1),
         )
-        val revertedNegroni = revertedCocktails.single()
-        assertFalse(revertedNegroni.inBarShelf)
-        assertEquals(1, revertedNegroni.missingIngredientsCount)
-        assertEquals("""["Sweet Vermouth"]""", revertedNegroni.missingIngredientNamesJson)
-        val vermouth = revertedIngredients.first { it.ingredientId == 2 }
+        val afterRevert = applyAvailabilityRecalculation(listOf(negroni), revertRecalc)
+        val revertedNegroni = afterRevert.single()
+        assertFalse(revertedNegroni.cocktail.inBarShelf)
+        assertEquals(1, revertedNegroni.cocktail.missingIngredientsCount)
+        assertEquals("""["Sweet Vermouth"]""", revertedNegroni.cocktail.missingIngredientNamesJson)
+        val vermouth = revertedNegroni.ingredients.first { it.ingredientId == 2 }
         assertFalse(vermouth.inBarShelfAsSubstitute)
         assertFalse(vermouth.toModel().substitutes.single().inBarShelf)
+
+        // Variant matching via catalog parentIngredientId, isSpecified protection, empty shelf clearing,
+        // all-optional exclusion, and preserving unaffected list-synced inBarShelf cocktails
+        val catalog = listOf(
+            IngredientEntity(1, 7, "gin", "Gin", 40.0, null, null, null, null, null),
+            IngredientEntity(101, 7, "beefeater-gin", "Beefeater Gin", 40.0, null, null, null, parentIngredientId = 1, null),
+            IngredientEntity(99, 7, "water", "Water", 0.0, null, null, null, null, null),
+        )
+        val variantCocktail = CocktailDto(
+            id = 3,
+            slug = "gimlet",
+            name = "Gin Cocktail",
+            instructions = "Stir.",
+            ingredients = listOf(
+                CocktailIngredientDto(sort = 1, amount = 60.0, units = "ml", ingredient = IngredientBasicDto(1, "gin", "Gin"), isSpecified = false),
+            ),
+        ).let { CocktailWithIngredients(it.toEntityAndIngredients(7).first, it.toEntityAndIngredients(7).second) }
+        val specifiedCocktail = CocktailDto(
+            id = 4,
+            slug = "specific-gin",
+            name = "Specific Gin Drink",
+            instructions = "Stir.",
+            ingredients = listOf(
+                CocktailIngredientDto(sort = 1, amount = 60.0, units = "ml", ingredient = IngredientBasicDto(1, "gin", "Gin"), isSpecified = true),
+            ),
+        ).let { CocktailWithIngredients(it.toEntityAndIngredients(7).first, it.toEntityAndIngredients(7).second) }
+        val optionalOnlyCocktail = CocktailDto(
+            id = 5,
+            slug = "bitters-splash",
+            name = "Bitters Only",
+            instructions = "Dash.",
+            ingredients = listOf(
+                CocktailIngredientDto(sort = 1, amount = 1.0, units = "dash", optional = true, ingredient = IngredientBasicDto(4, "orange-bitters", "Orange Bitters")),
+            ),
+        ).let { CocktailWithIngredients(it.toEntityAndIngredients(7).first, it.toEntityAndIngredients(7).second) }
+        val listSyncedSubCocktail = CocktailDto(
+            id = 6,
+            slug = "list-sub",
+            name = "List Synced Sub",
+            instructions = "Stir.",
+            inBarShelf = true,
+            ingredients = listOf(
+                CocktailIngredientDto(sort = 1, amount = 60.0, units = "ml", ingredient = IngredientBasicDto(5, "rum", "White Rum"), inBarShelf = false),
+            ),
+        ).let { CocktailWithIngredients(it.toEntityAndIngredients(7).first, it.toEntityAndIngredients(7).second) }
+
+        val hierarchyItems = listOf(variantCocktail, specifiedCocktail, optionalOnlyCocktail, listSyncedSubCocktail, daiquiri)
+        val hierarchyRecalc = recalculateCocktailAvailability(
+            items = hierarchyItems,
+            shelfIngredientIds = setOf(101, 4),
+            catalogIngredients = catalog,
+            toggledIngredientIds = setOf(101),
+        )
+        val afterHierarchy = applyAvailabilityRecalculation(hierarchyItems, hierarchyRecalc)
+        assertTrue(afterHierarchy.first { it.cocktail.id == 3 }.cocktail.inBarShelf)
+        assertTrue(afterHierarchy.first { it.cocktail.id == 3 }.ingredients.single().inBarShelfAsVariant)
+        assertFalse(afterHierarchy.first { it.cocktail.id == 4 }.cocktail.inBarShelf)
+        assertFalse(afterHierarchy.first { it.cocktail.id == 4 }.ingredients.single().inBarShelfAsVariant)
+        assertFalse(afterHierarchy.first { it.cocktail.id == 5 }.cocktail.inBarShelf)
+        assertTrue(afterHierarchy.first { it.cocktail.id == 6 }.cocktail.inBarShelf)
+
+        // Emptying shelf clears variant and complex flags completely
+        val emptyShelfRecalc = recalculateCocktailAvailability(
+            items = afterHierarchy,
+            shelfIngredientIds = emptySet(),
+            catalogIngredients = catalog,
+        )
+        val afterEmpty = applyAvailabilityRecalculation(afterHierarchy, emptyShelfRecalc)
+        assertFalse(afterEmpty.first { it.cocktail.id == 3 }.ingredients.single().inBarShelfAsVariant)
+        assertFalse(afterEmpty.first { it.cocktail.id == 3 }.cocktail.inBarShelf)
+        assertFalse(afterEmpty.first { it.cocktail.id == 2 }.ingredients.first { it.ingredientId == 6 }.inBarShelfAsComplex)
     }
 
     @Test
@@ -227,6 +300,8 @@ class InventoryAvailabilityAndRepositoryTest {
             cocktailDao = db.cocktailDao,
             inventoryDao = db.inventoryDao,
             catalogDao = db.catalogDao,
+            syncDao = db.syncDao,
+            mutationCoordinator = BarMutationCoordinator(),
         )
 
         val addResult = repo.setInBarShelf(listOf(1, 1, -5), inStock = true)
@@ -237,7 +312,7 @@ class InventoryAvailabilityAndRepositoryTest {
         assertTrue(db.cocktailDao.getCocktailsWithIngredientsForBar(7).single().cocktail.inBarShelf)
         assertTrue(repo.observeBarShelfIngredients().first().single { it.id == 1 }.inBarShelf)
         repo.lastBackgroundSyncJob?.join()
-        assertEquals(listOf(true), cocktailRepo.syncForceCalls)
+        assertEquals(listOf(true), cocktailRepo.silentSyncForceCalls)
 
         api.onRemoveBarInventory = { _, _ ->
             assertFalse(1 in db.inventoryDao.getBarShelfIngredientIds(7))
@@ -275,6 +350,8 @@ class InventoryAvailabilityAndRepositoryTest {
             cocktailDao = db.cocktailDao,
             inventoryDao = db.inventoryDao,
             catalogDao = db.catalogDao,
+            syncDao = db.syncDao,
+            mutationCoordinator = BarMutationCoordinator(),
         )
 
         assertTrue(repo.addToShoppingList(listOf(20), quantity = 3).isSuccess)
@@ -350,6 +427,8 @@ class InventoryAvailabilityAndRepositoryTest {
             cocktailDao = db.cocktailDao,
             inventoryDao = db.inventoryDao,
             catalogDao = db.catalogDao,
+            syncDao = db.syncDao,
+            mutationCoordinator = BarMutationCoordinator(),
         )
 
         // Partial failure: shelf add succeeds on server, shopping list removal fails
@@ -359,6 +438,8 @@ class InventoryAvailabilityAndRepositoryTest {
         assertEquals(listOf(1), db.inventoryDao.getBarShelfIngredientIds(7))
         assertTrue(db.cocktailDao.getCocktailsWithIngredientsForBar(7).single().cocktail.inBarShelf)
         assertEquals(listOf(ShoppingListEntity(barId = 7, ingredientId = 1, quantity = 2)), db.inventoryDao.getShoppingListSnapshot(7))
+        repo.lastBackgroundSyncJob?.join()
+        assertEquals(listOf(true), cocktailRepo.silentSyncForceCalls)
 
         // Full success flow
         api.onRemoveShoppingList = { _, _ -> }
@@ -367,7 +448,7 @@ class InventoryAvailabilityAndRepositoryTest {
         assertEquals(listOf(1), db.inventoryDao.getBarShelfIngredientIds(7))
         assertTrue(db.inventoryDao.getShoppingListSnapshot(7).isEmpty())
         repo.lastBackgroundSyncJob?.join()
-        assertEquals(listOf(true), cocktailRepo.syncForceCalls)
+        assertEquals(listOf(true, true), cocktailRepo.silentSyncForceCalls)
     }
 
     @Test
@@ -401,6 +482,8 @@ class InventoryAvailabilityAndRepositoryTest {
             cocktailDao = db.cocktailDao,
             inventoryDao = db.inventoryDao,
             catalogDao = db.catalogDao,
+            syncDao = db.syncDao,
+            mutationCoordinator = BarMutationCoordinator(),
         )
 
         val recommended = repo.getRecommendedIngredients().getOrThrow()
@@ -466,6 +549,8 @@ class InventoryAvailabilityAndRepositoryTest {
             cocktailDao = db.cocktailDao,
             inventoryDao = db.inventoryDao,
             catalogDao = db.catalogDao,
+            syncDao = db.syncDao,
+            mutationCoordinator = BarMutationCoordinator(),
         )
 
         val addDeferred = async { repo.setInBarShelf(listOf(5), inStock = true) }
@@ -559,6 +644,7 @@ class InventoryAvailabilityAndRepositoryTest {
             inventoryDao = db.inventoryDao,
             catalogDao = db.catalogDao,
             syncDao = db.syncDao,
+            mutationCoordinator = BarMutationCoordinator(),
         )
 
         sessionRepo.setAuthenticatedWithoutEmittingFirst(
@@ -578,6 +664,256 @@ class InventoryAvailabilityAndRepositoryTest {
             listOf(ShoppingListEntity(barId = 7, ingredientId = 10, quantity = 2)),
             db.inventoryDao.getShoppingListSnapshot(7),
         )
+    }
+
+    @Test
+    fun `shared coordinator blocks stale syncAll overwrite and preserves favorites and deletions across shelf toggles`() = runTest {
+        val db = FakeBarDatabase()
+        val coordinator = BarMutationCoordinator()
+        val syncEnteredFetch = CompletableDeferred<Unit>()
+        val allowSyncFetchFinish = CompletableDeferred<Unit>()
+        var armGate = false
+        var gatedShoppingListGetCount = 0
+
+        val ginDto = CocktailDto(
+            id = 10,
+            slug = "martini",
+            name = "Dry Martini",
+            instructions = "Stir.",
+            ingredients = listOf(
+                CocktailIngredientDto(sort = 1, amount = 60.0, units = "ml", ingredient = IngredientBasicDto(1, "gin", "Gin"), inBarShelf = false),
+            ),
+            isFavorited = false,
+            inBarShelf = false,
+        )
+        val negroniDto = CocktailDto(
+            id = 11,
+            slug = "negroni",
+            name = "Negroni",
+            instructions = "Stir.",
+            ingredients = listOf(
+                CocktailIngredientDto(sort = 1, amount = 30.0, units = "ml", ingredient = IngredientBasicDto(2, "campari", "Campari"), inBarShelf = false),
+            ),
+            isFavorited = false,
+            inBarShelf = false,
+        )
+        db.seedCocktail(7, ginDto)
+        db.seedCocktail(7, negroniDto)
+
+        var serverCocktails = listOf(ginDto, negroniDto)
+        val api = FakeBarAssistantApi(profile = ProfileDto(42, "Ryan", "ryan@example.com")).apply {
+            onGetCocktails = { serverCocktails }
+            onGetShoppingList = {
+                if (!armGate) {
+                    emptyList()
+                } else {
+                    gatedShoppingListGetCount += 1
+                    if (gatedShoppingListGetCount == 1) {
+                        syncEnteredFetch.complete(Unit)
+                        allowSyncFetchFinish.await()
+                        emptyList()
+                    } else {
+                        listOf(ShoppingListItemDto(IngredientBasicDto(9, "vermouth", "Vermouth"), quantity = 2))
+                    }
+                }
+            }
+            onToggleFavorite = { id ->
+                serverCocktails = serverCocktails.map { dto ->
+                    if (dto.id == id) dto.copy(isFavorited = true) else dto
+                }
+                true
+            }
+            onDeleteCocktail = { id ->
+                serverCocktails = serverCocktails.filterNot { it.id == id }
+            }
+            onAddBarInventory = { _, ids ->
+                serverCocktails = serverCocktails.map { dto ->
+                    val updatedIngredients = dto.ingredients.map { ing ->
+                        if (ing.ingredient.id in ids) ing.copy(inBarShelf = true) else ing
+                    }
+                    dto.copy(
+                        ingredients = updatedIngredients,
+                        inBarShelf = dto.inBarShelf || updatedIngredients.all { it.optional || it.inBarShelf },
+                    )
+                }
+            }
+        }
+        val sessionRepo = FakeSessionRepository(
+            SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
+        )
+        val cocktailRepo = DefaultCocktailRepository(
+            api = api,
+            sessionRepository = sessionRepo,
+            cocktailDao = db.cocktailDao,
+            inventoryDao = db.inventoryDao,
+            catalogDao = db.catalogDao,
+            syncDao = db.syncDao,
+            mutationCoordinator = coordinator,
+        )
+        val inventoryRepo = DefaultInventoryRepository(
+            api = api,
+            sessionRepository = sessionRepo,
+            cocktailRepository = cocktailRepo,
+            cocktailDao = db.cocktailDao,
+            inventoryDao = db.inventoryDao,
+            catalogDao = db.catalogDao,
+            syncDao = db.syncDao,
+            mutationCoordinator = coordinator,
+        )
+
+        // Let initial auto-sync settle before gating the explicit syncAll(force = true) call
+        assertTrue(cocktailRepo.syncAll(force = false).isSuccess)
+        armGate = true
+
+        val syncDeferred = async { cocktailRepo.syncAll(force = true) }
+        syncEnteredFetch.await()
+
+        // Shopping list write happens while syncAll() is fetching the old empty shopping list
+        assertTrue(inventoryRepo.addToShoppingList(listOf(9), quantity = 2).isSuccess)
+        assertEquals(listOf(ShoppingListEntity(barId = 7, ingredientId = 9, quantity = 2)), db.inventoryDao.getShoppingListSnapshot(7))
+
+        allowSyncFetchFinish.complete(Unit)
+        assertTrue(syncDeferred.await().isSuccess)
+        // Because shopping mutation bumped shared generation, syncAll retried and kept/synced quantity=2
+        assertEquals(listOf(ShoppingListEntity(barId = 7, ingredientId = 9, quantity = 2)), db.inventoryDao.getShoppingListSnapshot(7))
+        assertEquals(2, gatedShoppingListGetCount)
+
+        // Favorite update + delete during shelf toggle must not be clobbered or resurrected
+        assertTrue(cocktailRepo.toggleFavorite(10).isSuccess)
+        assertTrue(cocktailRepo.deleteCocktail(11).isSuccess)
+        assertTrue(inventoryRepo.setInBarShelf(listOf(1), inStock = true).isSuccess)
+
+        val cocktailsImmediately = db.cocktailDao.getCocktailsWithIngredientsForBar(7)
+        assertEquals(listOf(10), cocktailsImmediately.map { it.cocktail.id })
+        assertTrue(cocktailsImmediately.single().cocktail.isFavorite)
+        assertTrue(cocktailsImmediately.single().cocktail.inBarShelf)
+
+        inventoryRepo.lastBackgroundSyncJob?.join()
+        val cocktailsAfter = db.cocktailDao.getCocktailsWithIngredientsForBar(7)
+        assertEquals(listOf(10), cocktailsAfter.map { it.cocktail.id })
+        assertTrue(cocktailsAfter.single().cocktail.isFavorite)
+        assertTrue(cocktailsAfter.single().cocktail.inBarShelf)
+    }
+
+    @Test
+    fun `DefaultSessionRepository clears userId on same-server same-bar token change and rejects stale token setActiveUserId`() = runTest {
+        val dataStore = FakePreferencesDataStore()
+        val preferences = AppPreferences(dataStore)
+        val tokenStore = FakeTokenStore()
+        val db = FakeBarDatabase()
+        val syncDao = FakeSyncDao(db)
+        val sessionRepo = DefaultSessionRepository(
+            tokenStore = tokenStore,
+            appPreferences = preferences,
+            syncDao = syncDao,
+            imageCacheCleaner = lazy { ImageCacheCleaner {} },
+        )
+
+        // User A signs in on bar 7
+        sessionRepo.saveSession("https://bar.example.com", "tokenA", barId = 7, barName = "Home", userId = 10)
+        val epochA = sessionRepo.currentSessionEpoch()
+        assertEquals(10, sessionRepo.currentUserId())
+        db.shoppingListFlow.value = listOf(ShoppingListEntity(barId = 7, ingredientId = 1, quantity = 1))
+
+        // User B signs in on same server & bar 7 -> must reset DB & activeUserId
+        sessionRepo.saveSession("https://bar.example.com", "tokenB", barId = 7, barName = "Home", userId = null)
+        assertTrue(sessionRepo.currentSessionEpoch() > epochA)
+        assertNull(sessionRepo.currentUserId())
+        assertNull(preferences.currentSettings().activeUserId)
+        assertTrue(db.shoppingListFlow.value.isEmpty())
+
+        // Stale setActiveUserId from User A's token is rejected; User B's token succeeds
+        sessionRepo.setActiveUserId(10, expectedToken = "tokenA")
+        assertNull(sessionRepo.currentUserId())
+        sessionRepo.setActiveUserId(20, expectedToken = "tokenB")
+        assertEquals(20, sessionRepo.currentUserId())
+    }
+
+    @Test
+    fun `DefaultInventoryRepository retries 403 userId, pins barId, cancels bg sync on logout, and deduplicates results`() = runTest {
+        val db = FakeBarDatabase()
+        val sessionRepo = FakeSessionRepository(
+            SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
+        )
+        sessionRepo.setActiveUserId(10) // Stale cached userId
+
+        var addAttempts = 0
+        val api = FakeBarAssistantApi(
+            profile = ProfileDto(42, "Ryan", "ryan@example.com"),
+            recommendedIngredients = listOf(
+                IngredientRecommendDto(5, "chartreuse", "Green Chartreuse", 3),
+                IngredientRecommendDto(5, "chartreuse", "Green Chartreuse", 3),
+            ),
+            extraCocktails = mapOf(
+                5 to listOf(
+                    CocktailBasicDto(101, "last-word", "Last Word"),
+                    CocktailBasicDto(101, "last-word", "Last Word"),
+                ),
+            ),
+        ).apply {
+            onAddShoppingList = { userId, _ ->
+                addAttempts += 1
+                if (userId == 10) {
+                    throw BarAssistantApiException(403, "Forbidden")
+                }
+            }
+        }
+        val cocktailRepo = FakeCocktailRepository()
+        val repo = DefaultInventoryRepository(
+            api = api,
+            sessionRepository = sessionRepo,
+            cocktailRepository = cocktailRepo,
+            cocktailDao = db.cocktailDao,
+            inventoryDao = db.inventoryDao,
+            catalogDao = db.catalogDao,
+            syncDao = db.syncDao,
+            mutationCoordinator = BarMutationCoordinator(),
+        )
+
+        assertTrue(repo.addToShoppingList(listOf(5), quantity = 1).isSuccess)
+        assertEquals(2, addAttempts)
+        assertEquals(1, api.getProfileCallCount)
+        assertEquals(42, sessionRepo.currentUserId())
+        assertEquals(listOf(Triple("add", 7, 10), Triple("add", 7, 42)), api.shoppingListBarUserLog)
+
+        // Duplicate recommendation & extra cocktail IDs are deduplicated
+        assertEquals(listOf(5), repo.getRecommendedIngredients().getOrThrow().map { it.id })
+        assertEquals(listOf(101), repo.getUnlockedCocktails(5).getOrThrow().map { it.id })
+
+        // Background sync uses syncAllSilent and cancels on logout
+        assertTrue(repo.setInBarShelf(listOf(5), inStock = true).isSuccess)
+        sessionRepo.clearSession()
+        repo.lastBackgroundSyncJob?.join()
+        assertEquals(null, cocktailRepo.syncStatus.value.errorMessage)
+    }
+
+    private fun applyAvailabilityRecalculation(
+        items: List<CocktailWithIngredients>,
+        recalc: CocktailAvailabilityRecalculation,
+    ): List<CocktailWithIngredients> {
+        val cocktailMap = recalc.cocktailUpdates.associateBy { it.cocktailId }
+        val ingMap = recalc.ingredientUpdates.associateBy { Triple(it.cocktailId, it.ingredientId, it.sort) }
+        return items.map { item ->
+            val updatedCocktail = cocktailMap[item.cocktail.id]?.let { u ->
+                item.cocktail.copy(
+                    inBarShelf = u.inBarShelf,
+                    missingIngredientsCount = u.missingIngredientsCount,
+                    missingIngredientNamesJson = u.missingIngredientNamesJson,
+                )
+            } ?: item.cocktail
+            val updatedIngs = item.ingredients.map { ing ->
+                ingMap[Triple(ing.cocktailId, ing.ingredientId, ing.sort)]?.let { u ->
+                    ing.copy(
+                        inBarShelf = u.inBarShelf,
+                        inBarShelfAsSubstitute = u.inBarShelfAsSubstitute,
+                        inBarShelfAsVariant = u.inBarShelfAsVariant,
+                        inBarShelfAsComplex = u.inBarShelfAsComplex,
+                        substitutesJson = u.substitutesJson,
+                    )
+                } ?: ing
+            }
+            CocktailWithIngredients(updatedCocktail, updatedIngs)
+        }
     }
 
     private class FakePreferencesDataStore : DataStore<Preferences> {
@@ -609,17 +945,29 @@ class InventoryAvailabilityAndRepositoryTest {
         private val _sessionState = MutableStateFlow(initialState)
         override val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
         private var userId: Int? = null
+        private var epoch: Long = 1L
 
         fun setAuthenticatedWithoutEmittingFirst(state: SessionState.Authenticated) {
             _sessionState.value = state
         }
 
-        override suspend fun saveSession(serverUrl: String, token: String, barId: Int?, barName: String?) {
-            userId = null
+        override suspend fun saveSession(serverUrl: String, token: String, barId: Int?, barName: String?) =
+            saveSession(serverUrl, token, barId, barName, userId = null)
+
+        override suspend fun saveSession(
+            serverUrl: String,
+            token: String,
+            barId: Int?,
+            barName: String?,
+            userId: Int?,
+        ) {
+            epoch += 1L
+            this.userId = userId
             _sessionState.value = SessionState.Authenticated(serverUrl, barId, barName)
         }
 
         override suspend fun clearSession() {
+            epoch += 1L
             userId = null
             val lastUrl = (_sessionState.value as? SessionState.Authenticated)?.serverUrl
             _sessionState.value = SessionState.Unauthenticated(lastServerUrl = lastUrl)
@@ -635,7 +983,13 @@ class InventoryAvailabilityAndRepositoryTest {
 
         override suspend fun currentUserId(): Int? = userId
 
+        override fun currentSessionEpoch(): Long = epoch
+
         override suspend fun setActiveUserId(userId: Int) {
+            this.userId = userId
+        }
+
+        override suspend fun setActiveUserId(userId: Int?, expectedToken: String?) {
             this.userId = userId
         }
 
@@ -648,6 +1002,7 @@ class InventoryAvailabilityAndRepositoryTest {
         private val _syncStatus = MutableStateFlow(SyncStatus())
         override val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
         val syncForceCalls = mutableListOf<Boolean>()
+        val silentSyncForceCalls = mutableListOf<Boolean>()
 
         override fun observeCocktails(filter: CocktailFilter): Flow<List<CocktailSummary>> = flowOf(emptyList())
         override fun observeCocktailDetail(cocktailId: Int): Flow<CocktailDetail?> = flowOf(null)
@@ -655,6 +1010,11 @@ class InventoryAvailabilityAndRepositoryTest {
 
         override suspend fun syncAll(force: Boolean): Result<Unit> {
             syncForceCalls += force
+            return Result.success(Unit)
+        }
+
+        override suspend fun syncAllSilent(force: Boolean): Result<Unit> {
+            silentSyncForceCalls += force
             return Result.success(Unit)
         }
 
@@ -698,10 +1058,14 @@ class InventoryAvailabilityAndRepositoryTest {
         val removedBarInventoryCalls = mutableListOf<Pair<Int, List<Int>>>()
         val addedShoppingListCalls = mutableListOf<Pair<Int, List<ShoppingListIngredientInputDto>>>()
         val removedShoppingListCalls = mutableListOf<Pair<Int, List<Int>>>()
+        val shoppingListBarUserLog = mutableListOf<Triple<String, Int, Int>>()
 
         var onAddBarInventory: suspend (Int, List<Int>) -> Unit = { _, _ -> }
         var onRemoveBarInventory: suspend (Int, List<Int>) -> Unit = { _, _ -> }
         var onGetProfile: suspend () -> ProfileDto = { profile }
+        var onGetCocktails: suspend () -> List<CocktailDto> = { emptyList() }
+        var onToggleFavorite: suspend (Int) -> Boolean = { true }
+        var onDeleteCocktail: suspend (Int) -> Unit = {}
         var onGetRecommendedBarIngredients: suspend (Int) -> List<IngredientRecommendDto> = { recommendedIngredients }
         var onGetShoppingList: suspend (Int) -> List<ShoppingListItemDto> = { shoppingListItems }
         var onAddShoppingList: suspend (Int, List<ShoppingListIngredientInputDto>) -> Unit = { _, _ -> }
@@ -726,7 +1090,7 @@ class InventoryAvailabilityAndRepositoryTest {
         ): PaginatedEnvelope<BarDto> = getBars(page, perPage)
 
         override suspend fun getCocktails(page: Int, perPage: Int, query: String?): PaginatedEnvelope<CocktailDto> =
-            PaginatedEnvelope(emptyList())
+            PaginatedEnvelope(onGetCocktails())
 
         override suspend fun getCocktail(idOrSlug: String): CocktailDto =
             throw IllegalStateException("Unused")
@@ -737,8 +1101,8 @@ class InventoryAvailabilityAndRepositoryTest {
         override suspend fun updateCocktail(cocktailId: Int, request: CocktailWriteRequestDto): CocktailDto =
             throw IllegalStateException("Unused")
 
-        override suspend fun deleteCocktail(cocktailId: Int) = Unit
-        override suspend fun toggleFavorite(cocktailId: Int): Boolean = true
+        override suspend fun deleteCocktail(cocktailId: Int) = onDeleteCocktail(cocktailId)
+        override suspend fun toggleFavorite(cocktailId: Int): Boolean = onToggleFavorite(cocktailId)
 
         override suspend fun uploadImage(
             bytes: ByteArray,
@@ -780,6 +1144,8 @@ class InventoryAvailabilityAndRepositoryTest {
             return onGetProfile()
         }
 
+        override suspend fun getProfile(serverUrl: String, token: String): ProfileDto = getProfile()
+
         override suspend fun addBarInventoryIngredients(barId: Int, ingredientIds: List<Int>) {
             addedBarInventoryCalls += barId to ingredientIds
             onAddBarInventory(barId, ingredientIds)
@@ -796,15 +1162,23 @@ class InventoryAvailabilityAndRepositoryTest {
         override suspend fun getExtraCocktailsForIngredient(barId: Int, ingredientId: Int): List<CocktailBasicDto> =
             extraCocktails[ingredientId].orEmpty()
 
-        override suspend fun getShoppingList(userId: Int): List<ShoppingListItemDto> =
-            onGetShoppingList(userId)
+        override suspend fun getShoppingList(barId: Int, userId: Int): List<ShoppingListItemDto> {
+            shoppingListBarUserLog += Triple("get", barId, userId)
+            return onGetShoppingList(userId)
+        }
 
-        override suspend fun addToShoppingList(userId: Int, items: List<ShoppingListIngredientInputDto>) {
+        override suspend fun addToShoppingList(
+            barId: Int,
+            userId: Int,
+            items: List<ShoppingListIngredientInputDto>,
+        ) {
+            shoppingListBarUserLog += Triple("add", barId, userId)
             addedShoppingListCalls += userId to items
             onAddShoppingList(userId, items)
         }
 
-        override suspend fun removeFromShoppingList(userId: Int, ingredientIds: List<Int>) {
+        override suspend fun removeFromShoppingList(barId: Int, userId: Int, ingredientIds: List<Int>) {
+            shoppingListBarUserLog += Triple("remove", barId, userId)
             removedShoppingListCalls += userId to ingredientIds
             onRemoveShoppingList(userId, ingredientIds)
         }
@@ -964,6 +1338,11 @@ class InventoryAvailabilityAndRepositoryTest {
             db.shelfFlow.value = db.shelfFlow.value.filterNot { it.barId == barId && it.ingredientId == ingredientId }
         }
 
+        override suspend fun deleteBarShelfItemsChunk(barId: Int, ingredientIds: List<Int>) {
+            val idSet = ingredientIds.toSet()
+            db.shelfFlow.value = db.shelfFlow.value.filterNot { it.barId == barId && it.ingredientId in idSet }
+        }
+
         override suspend fun clearBarShelf(barId: Int) {
             db.shelfFlow.value = db.shelfFlow.value.filterNot { it.barId == barId }
         }
@@ -977,6 +1356,12 @@ class InventoryAvailabilityAndRepositoryTest {
         override suspend fun deleteShoppingListItem(barId: Int, ingredientId: Int) {
             db.shoppingListFlow.value =
                 db.shoppingListFlow.value.filterNot { it.barId == barId && it.ingredientId == ingredientId }
+        }
+
+        override suspend fun deleteShoppingListItemsChunk(barId: Int, ingredientIds: List<Int>) {
+            val idSet = ingredientIds.toSet()
+            db.shoppingListFlow.value =
+                db.shoppingListFlow.value.filterNot { it.barId == barId && it.ingredientId in idSet }
         }
 
         override suspend fun clearShoppingList(barId: Int) {
@@ -1115,6 +1500,54 @@ class InventoryAvailabilityAndRepositoryTest {
 
         override suspend fun deleteAllSyncMetadata() {
             db.syncTimestamps.clear()
+        }
+
+        override suspend fun deleteBarShelfItemsChunk(barId: Int, ingredientIds: List<Int>) =
+            db.inventoryDao.deleteBarShelfItemsChunk(barId, ingredientIds)
+
+        override suspend fun updateCocktailAvailability(
+            barId: Int,
+            cocktailId: Int,
+            inBarShelf: Boolean,
+            missingIngredientsCount: Int,
+            missingIngredientNamesJson: String,
+        ) {
+            db.cocktailsFlow.value = db.cocktailsFlow.value.map { cocktail ->
+                if (cocktail.barId == barId && cocktail.id == cocktailId) {
+                    cocktail.copy(
+                        inBarShelf = inBarShelf,
+                        missingIngredientsCount = missingIngredientsCount,
+                        missingIngredientNamesJson = missingIngredientNamesJson,
+                    )
+                } else {
+                    cocktail
+                }
+            }
+        }
+
+        override suspend fun updateCocktailIngredientAvailability(
+            cocktailId: Int,
+            ingredientId: Int,
+            sort: Int,
+            inBarShelf: Boolean,
+            inBarShelfAsSubstitute: Boolean,
+            inBarShelfAsVariant: Boolean,
+            inBarShelfAsComplex: Boolean,
+            substitutesJson: String,
+        ) {
+            db.cocktailIngredientsFlow.value = db.cocktailIngredientsFlow.value.map { ing ->
+                if (ing.cocktailId == cocktailId && ing.ingredientId == ingredientId && ing.sort == sort) {
+                    ing.copy(
+                        inBarShelf = inBarShelf,
+                        inBarShelfAsSubstitute = inBarShelfAsSubstitute,
+                        inBarShelfAsVariant = inBarShelfAsVariant,
+                        inBarShelfAsComplex = inBarShelfAsComplex,
+                        substitutesJson = substitutesJson,
+                    )
+                } else {
+                    ing
+                }
+            }
         }
     }
 }

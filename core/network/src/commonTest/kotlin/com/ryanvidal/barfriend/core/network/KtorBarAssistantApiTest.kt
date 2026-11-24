@@ -615,7 +615,7 @@ class KtorBarAssistantApiTest {
         )
         val api = KtorBarAssistantApi(createBarAssistantHttpClient(engine, sessionProvider), sessionProvider)
 
-        val items = api.getShoppingList(userId = 42)
+        val items = api.getShoppingList(barId = 7, userId = 42)
         assertEquals(2, items.size)
         assertEquals(10, items[0].ingredient.id)
         assertEquals(2, items[0].quantity)
@@ -623,21 +623,22 @@ class KtorBarAssistantApiTest {
         assertNull(items[1].quantity)
 
         api.addToShoppingList(
+            barId = 8,
             userId = 42,
             items = listOf(
                 ShoppingListIngredientInputDto(id = 10, quantity = 2),
                 ShoppingListIngredientInputDto(id = 11),
             ),
         )
-        api.removeFromShoppingList(userId = 42, ingredientIds = listOf(10, 11))
+        api.removeFromShoppingList(barId = 7, userId = 42, ingredientIds = listOf(10, 11))
 
         val error = assertFailsWith<BarAssistantApiException> {
-            api.removeFromShoppingList(userId = 99, ingredientIds = listOf(10))
+            api.removeFromShoppingList(barId = 8, userId = 99, ingredientIds = listOf(10))
         }
         assertEquals(403, error.statusCode)
         assertEquals("Forbidden", error.message)
 
-        assertEquals(listOf<String?>("7", "7", "7", "7"), seenBarHeaders)
+        assertEquals(listOf<String?>("7", "8", "7", "8"), seenBarHeaders)
         assertEquals(
             listOf(
                 Triple(HttpMethod.Get, "/api/members/42/shopping-list", ""),
@@ -659,6 +660,73 @@ class KtorBarAssistantApiTest {
             ),
             seenRequests,
         )
+    }
+
+    @Test
+    fun `getIngredients requests hierarchy and images includes and parses ingredient hierarchy`() = runTest {
+        var seenInclude: String? = null
+        val engine = MockEngine { request ->
+            seenInclude = request.url.parameters["include"]
+            respond(
+                content = """
+                    {
+                      "data": [
+                        {
+                          "id": 10,
+                          "slug": "london-dry-gin",
+                          "name": "London Dry Gin",
+                          "strength": 40.0,
+                          "hierarchy": {
+                            "root_ingredient_id": 1,
+                            "path_to_self": "1.10",
+                            "parent_ingredient": {"id": 1, "slug": "gin", "name": "Gin"},
+                            "ancestors": [{"id": 1, "slug": "gin", "name": "Gin"}]
+                          },
+                          "images": [{"id": 3, "url": "/img.jpg", "thumb_url": "/thumb.jpg", "sort": 1}]
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val sessionProvider = FakeSessionProvider(
+            serverUrl = "https://bar.example.com",
+            token = "1|token",
+            barId = 7,
+        )
+        val api = KtorBarAssistantApi(createBarAssistantHttpClient(engine, sessionProvider), sessionProvider)
+
+        val page = api.getIngredients(page = 1, perPage = 200)
+        assertEquals("images,parentIngredient,ancestors", seenInclude)
+        val dto = page.data.single()
+        assertEquals(1, dto.hierarchy?.rootIngredientId)
+        assertEquals(1, dto.hierarchy?.parentIngredient?.id)
+        assertEquals(listOf("Gin"), dto.hierarchy?.ancestors?.map { it.name })
+        assertEquals(1, dto.images.size)
+    }
+
+    @Test
+    fun `getProfile overload uses explicit server url and bearer token without saved session`() = runTest {
+        var seenAuth: String? = null
+        var seenPath: String? = null
+        val engine = MockEngine { request ->
+            seenAuth = request.headers[HttpHeaders.Authorization]
+            seenPath = request.url.encodedPath
+            respond(
+                content = """{"data":{"id":77,"name":"Ryan","email":"ryan@example.com"}}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val sessionProvider = FakeSessionProvider(serverUrl = null, token = null, barId = null)
+        val api = KtorBarAssistantApi(createBarAssistantHttpClient(engine, sessionProvider), sessionProvider)
+
+        val profile = api.getProfile(serverUrl = "https://bar.example.com", token = "2|explicit")
+        assertEquals(77, profile.id)
+        assertEquals("Bearer 2|explicit", seenAuth)
+        assertEquals("/api/profile", seenPath)
     }
 
     private fun sampleWriteRequest(methodId: Int? = 1): CocktailWriteRequestDto =

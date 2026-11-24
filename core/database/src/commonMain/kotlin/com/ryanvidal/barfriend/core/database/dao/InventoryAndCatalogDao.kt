@@ -34,6 +34,17 @@ interface InventoryDao {
     @Query("DELETE FROM bar_shelf WHERE barId = :barId AND ingredientId = :ingredientId")
     suspend fun deleteBarShelfItem(barId: Int, ingredientId: Int)
 
+    @Query("DELETE FROM bar_shelf WHERE barId = :barId AND ingredientId IN (:ingredientIds)")
+    suspend fun deleteBarShelfItemsChunk(barId: Int, ingredientIds: List<Int>)
+
+    @Transaction
+    suspend fun deleteBarShelfItems(barId: Int, ingredientIds: List<Int>) {
+        if (ingredientIds.isEmpty()) return
+        ingredientIds.distinct().chunked(900).forEach { chunk ->
+            deleteBarShelfItemsChunk(barId, chunk)
+        }
+    }
+
     @Query("DELETE FROM bar_shelf WHERE barId = :barId")
     suspend fun clearBarShelf(barId: Int)
 
@@ -50,6 +61,17 @@ interface InventoryDao {
 
     @Query("DELETE FROM shopping_list WHERE barId = :barId AND ingredientId = :ingredientId")
     suspend fun deleteShoppingListItem(barId: Int, ingredientId: Int)
+
+    @Query("DELETE FROM shopping_list WHERE barId = :barId AND ingredientId IN (:ingredientIds)")
+    suspend fun deleteShoppingListItemsChunk(barId: Int, ingredientIds: List<Int>)
+
+    @Transaction
+    suspend fun deleteShoppingListItems(barId: Int, ingredientIds: List<Int>) {
+        if (ingredientIds.isEmpty()) return
+        ingredientIds.distinct().chunked(900).forEach { chunk ->
+            deleteShoppingListItemsChunk(barId, chunk)
+        }
+    }
 
     @Query("DELETE FROM shopping_list WHERE barId = :barId")
     suspend fun clearShoppingList(barId: Int)

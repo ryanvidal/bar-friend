@@ -163,6 +163,14 @@ data class IngredientCategoryDto(
 )
 
 @Serializable
+data class IngredientHierarchyDto(
+    @SerialName("root_ingredient_id") val rootIngredientId: Int? = null,
+    @SerialName("path_to_self") val pathToSelf: String? = null,
+    @SerialName("parent_ingredient") val parentIngredient: IngredientBasicDto? = null,
+    val ancestors: List<IngredientBasicDto> = emptyList(),
+)
+
+@Serializable
 data class IngredientDto(
     val id: Int,
     val slug: String,
@@ -174,6 +182,7 @@ data class IngredientDto(
     @SerialName("in_bar_shelf") val inBarShelf: Boolean = false,
     @SerialName("category") val category: IngredientCategoryDto? = null,
     @SerialName("parent_ingredient") val parentIngredient: IngredientBasicDto? = null,
+    val hierarchy: IngredientHierarchyDto? = null,
 )
 
 @Serializable
