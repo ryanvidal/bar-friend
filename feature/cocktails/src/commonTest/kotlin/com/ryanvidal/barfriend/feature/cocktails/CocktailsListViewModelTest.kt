@@ -75,7 +75,8 @@ class CocktailsListViewModelTest {
     @Test
     fun `filters by query, quick toggles, and advanced filters`() = runTest(testDispatcher) {
         val repository = FakeCocktailRepository(initialCocktails = sampleSummaries())
-        val viewModel = CocktailsListViewModel(repository)
+        val syncCoordinator = FakeBarSyncCoordinator()
+        val viewModel = CocktailsListViewModel(repository, syncCoordinator)
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
         }
@@ -126,7 +127,8 @@ class CocktailsListViewModelTest {
         val repository = FakeCocktailRepository(initialCocktails = sampleSummaries()).apply {
             toggleFavoriteSuspendHook = { id -> gates.getValue(id).await() }
         }
-        val viewModel = CocktailsListViewModel(repository)
+        val syncCoordinator = FakeBarSyncCoordinator()
+        val viewModel = CocktailsListViewModel(repository, syncCoordinator)
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
         }
@@ -150,14 +152,15 @@ class CocktailsListViewModelTest {
 
         viewModel.refresh()
         advanceUntilIdle()
-        assertEquals(1, repository.syncAllCalls)
+        assertEquals(1, syncCoordinator.syncAllCalls)
         assertFalse(viewModel.uiState.value.syncStatus.isSyncing)
     }
 
     @Test
     fun `drops stale tag, glass, and method filters when bar catalog updates`() = runTest(testDispatcher) {
         val repository = FakeCocktailRepository(initialCocktails = sampleSummaries())
-        val viewModel = CocktailsListViewModel(repository)
+        val syncCoordinator = FakeBarSyncCoordinator()
+        val viewModel = CocktailsListViewModel(repository, syncCoordinator)
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
         }

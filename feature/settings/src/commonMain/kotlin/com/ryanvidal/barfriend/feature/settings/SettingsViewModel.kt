@@ -4,7 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ryanvidal.barfriend.core.data.AppPreferences
 import com.ryanvidal.barfriend.core.data.AuthRepository
-import com.ryanvidal.barfriend.core.data.CocktailRepository
+import com.ryanvidal.barfriend.core.data.BarSyncCoordinator
 import com.ryanvidal.barfriend.core.data.SessionRepository
 import com.ryanvidal.barfriend.core.data.SessionState
 import com.ryanvidal.barfriend.core.data.SyncStatus
@@ -33,7 +33,7 @@ class SettingsViewModel(
     private val appPreferences: AppPreferences,
     private val sessionRepository: SessionRepository,
     private val authRepository: AuthRepository,
-    private val cocktailRepository: CocktailRepository,
+    private val syncCoordinator: BarSyncCoordinator,
 ) : ViewModel() {
     private val isSigningOut = MutableStateFlow(false)
     private val errorMessage = MutableStateFlow<String?>(null)
@@ -41,7 +41,7 @@ class SettingsViewModel(
     val uiState: StateFlow<SettingsUiState> = combine(
         appPreferences.settings,
         sessionRepository.sessionState,
-        cocktailRepository.syncStatus,
+        syncCoordinator.syncStatus,
         isSigningOut,
         errorMessage,
     ) { settings, session, syncStatus, signingOut, error ->
@@ -98,11 +98,11 @@ class SettingsViewModel(
     }
 
     fun syncNow() {
-        if (cocktailRepository.syncStatus.value.isSyncing || isSigningOut.value) return
+        if (syncCoordinator.syncStatus.value.isSyncing || isSigningOut.value) return
         errorMessage.value = null
         viewModelScope.launch {
             try {
-                cocktailRepository.syncAll(force = true).onFailure { error ->
+                syncCoordinator.syncAll(force = true).onFailure { error ->
                     errorMessage.value = error.message?.takeIf { it.isNotBlank() } ?: "Sync failed."
                 }
             } catch (e: CancellationException) {

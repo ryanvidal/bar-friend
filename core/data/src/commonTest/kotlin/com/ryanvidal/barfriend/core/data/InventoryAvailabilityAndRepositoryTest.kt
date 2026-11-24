@@ -20,15 +20,8 @@ import com.ryanvidal.barfriend.core.database.entity.ShoppingListEntity
 import com.ryanvidal.barfriend.core.database.entity.SyncMetadataEntity
 import com.ryanvidal.barfriend.core.database.entity.TagEntity
 import com.ryanvidal.barfriend.core.database.entity.UtensilEntity
-import com.ryanvidal.barfriend.core.model.BarCatalog
-import com.ryanvidal.barfriend.core.model.CocktailDetail
-import com.ryanvidal.barfriend.core.model.CocktailFilter
-import com.ryanvidal.barfriend.core.model.CocktailSummary
-import com.ryanvidal.barfriend.core.model.CocktailUpsertRequest
 import com.ryanvidal.barfriend.core.model.RecommendedIngredient
-import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.UnlockedCocktail
-import com.ryanvidal.barfriend.core.model.UploadedImage
 import com.ryanvidal.barfriend.core.network.BarAssistantApi
 import com.ryanvidal.barfriend.core.network.BarAssistantApiException
 import com.ryanvidal.barfriend.core.network.dto.BarDto
@@ -55,7 +48,11 @@ import com.ryanvidal.barfriend.core.network.dto.UtensilDto
 import com.ryanvidal.barfriend.core.platform.SecureTokenStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,8 +61,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlin.concurrent.Volatile
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -289,19 +288,15 @@ class InventoryAvailabilityAndRepositoryTest {
                     db.cocktailDao.getCocktailsWithIngredientsForBar(7).single().cocktail.inBarShelf
             }
         }
-        val cocktailRepo = FakeCocktailRepository()
+        val syncCoordinator = FakeBarSyncCoordinator()
         val sessionRepo = FakeSessionRepository(
             SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
         )
-        val repo = DefaultInventoryRepository(
+        val repo = createInventoryRepository(
+            db = db,
             api = api,
-            sessionRepository = sessionRepo,
-            cocktailRepository = cocktailRepo,
-            cocktailDao = db.cocktailDao,
-            inventoryDao = db.inventoryDao,
-            catalogDao = db.catalogDao,
-            syncDao = db.syncDao,
-            mutationCoordinator = BarMutationCoordinator(),
+            sessionRepo = sessionRepo,
+            syncCoordinator = syncCoordinator,
         )
 
         val addResult = repo.setInBarShelf(listOf(1, 1, -5), inStock = true)
@@ -311,8 +306,8 @@ class InventoryAvailabilityAndRepositoryTest {
         assertEquals(listOf(1), db.inventoryDao.getBarShelfIngredientIds(7))
         assertTrue(db.cocktailDao.getCocktailsWithIngredientsForBar(7).single().cocktail.inBarShelf)
         assertTrue(repo.observeBarShelfIngredients().first().single { it.id == 1 }.inBarShelf)
-        repo.lastBackgroundSyncJob?.join()
-        assertEquals(listOf(true), cocktailRepo.silentSyncForceCalls)
+        syncCoordinator.lastBackgroundSyncJob?.join()
+        assertEquals(listOf(true), syncCoordinator.silentSyncForceCalls)
 
         api.onRemoveBarInventory = { _, _ ->
             assertFalse(1 in db.inventoryDao.getBarShelfIngredientIds(7))
@@ -343,15 +338,10 @@ class InventoryAvailabilityAndRepositoryTest {
         val sessionRepo = FakeSessionRepository(
             SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
         )
-        val repo = DefaultInventoryRepository(
+        val repo = createInventoryRepository(
+            db = db,
             api = api,
-            sessionRepository = sessionRepo,
-            cocktailRepository = FakeCocktailRepository(),
-            cocktailDao = db.cocktailDao,
-            inventoryDao = db.inventoryDao,
-            catalogDao = db.catalogDao,
-            syncDao = db.syncDao,
-            mutationCoordinator = BarMutationCoordinator(),
+            sessionRepo = sessionRepo,
         )
 
         assertTrue(repo.addToShoppingList(listOf(20), quantity = 3).isSuccess)
@@ -416,19 +406,15 @@ class InventoryAvailabilityAndRepositoryTest {
         db.inventoryDao.upsertShoppingListItems(listOf(ShoppingListEntity(barId = 7, ingredientId = 1, quantity = 2)))
 
         val api = FakeBarAssistantApi(profile = ProfileDto(id = 42, name = "Ryan", email = "ryan@example.com"))
-        val cocktailRepo = FakeCocktailRepository()
+        val syncCoordinator = FakeBarSyncCoordinator()
         val sessionRepo = FakeSessionRepository(
             SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
         )
-        val repo = DefaultInventoryRepository(
+        val repo = createInventoryRepository(
+            db = db,
             api = api,
-            sessionRepository = sessionRepo,
-            cocktailRepository = cocktailRepo,
-            cocktailDao = db.cocktailDao,
-            inventoryDao = db.inventoryDao,
-            catalogDao = db.catalogDao,
-            syncDao = db.syncDao,
-            mutationCoordinator = BarMutationCoordinator(),
+            sessionRepo = sessionRepo,
+            syncCoordinator = syncCoordinator,
         )
 
         // Partial failure: shelf add succeeds on server, shopping list removal fails
@@ -438,8 +424,8 @@ class InventoryAvailabilityAndRepositoryTest {
         assertEquals(listOf(1), db.inventoryDao.getBarShelfIngredientIds(7))
         assertTrue(db.cocktailDao.getCocktailsWithIngredientsForBar(7).single().cocktail.inBarShelf)
         assertEquals(listOf(ShoppingListEntity(barId = 7, ingredientId = 1, quantity = 2)), db.inventoryDao.getShoppingListSnapshot(7))
-        repo.lastBackgroundSyncJob?.join()
-        assertEquals(listOf(true), cocktailRepo.silentSyncForceCalls)
+        syncCoordinator.lastBackgroundSyncJob?.join()
+        assertEquals(listOf(true), syncCoordinator.silentSyncForceCalls)
 
         // Full success flow
         api.onRemoveShoppingList = { _, _ -> }
@@ -447,8 +433,8 @@ class InventoryAvailabilityAndRepositoryTest {
         assertTrue(success.isSuccess)
         assertEquals(listOf(1), db.inventoryDao.getBarShelfIngredientIds(7))
         assertTrue(db.inventoryDao.getShoppingListSnapshot(7).isEmpty())
-        repo.lastBackgroundSyncJob?.join()
-        assertEquals(listOf(true, true), cocktailRepo.silentSyncForceCalls)
+        syncCoordinator.lastBackgroundSyncJob?.join()
+        assertEquals(listOf(true, true), syncCoordinator.silentSyncForceCalls)
     }
 
     @Test
@@ -473,17 +459,12 @@ class InventoryAvailabilityAndRepositoryTest {
                 5 to listOf(CocktailBasicDto(101, "last-word", "Last Word")),
             ),
         )
-        val repo = DefaultInventoryRepository(
+        val repo = createInventoryRepository(
+            db = db,
             api = api,
-            sessionRepository = FakeSessionRepository(
+            sessionRepo = FakeSessionRepository(
                 SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
             ),
-            cocktailRepository = FakeCocktailRepository(),
-            cocktailDao = db.cocktailDao,
-            inventoryDao = db.inventoryDao,
-            catalogDao = db.catalogDao,
-            syncDao = db.syncDao,
-            mutationCoordinator = BarMutationCoordinator(),
         )
 
         val recommended = repo.getRecommendedIngredients().getOrThrow()
@@ -540,17 +521,14 @@ class InventoryAvailabilityAndRepositoryTest {
                 }
             }
         }
-        val repo = DefaultInventoryRepository(
+        val syncCoordinator = FakeBarSyncCoordinator()
+        val repo = createInventoryRepository(
+            db = db,
             api = api,
-            sessionRepository = FakeSessionRepository(
+            sessionRepo = FakeSessionRepository(
                 SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
             ),
-            cocktailRepository = FakeCocktailRepository(),
-            cocktailDao = db.cocktailDao,
-            inventoryDao = db.inventoryDao,
-            catalogDao = db.catalogDao,
-            syncDao = db.syncDao,
-            mutationCoordinator = BarMutationCoordinator(),
+            syncCoordinator = syncCoordinator,
         )
 
         val addDeferred = async { repo.setInBarShelf(listOf(5), inStock = true) }
@@ -566,7 +544,7 @@ class InventoryAvailabilityAndRepositoryTest {
         val recommended = recommendDeferred.await().getOrThrow()
         assertEquals(1, recommendCalls)
         assertTrue(recommended.isEmpty())
-        repo.lastBackgroundSyncJob?.join()
+        syncCoordinator.lastBackgroundSyncJob?.join()
     }
 
     @Test
@@ -637,20 +615,16 @@ class InventoryAvailabilityAndRepositoryTest {
             ),
         )
         val sessionRepo = FakeSessionRepository(SessionState.Unauthenticated())
-        val cocktailRepo = DefaultCocktailRepository(
+        val syncCoordinator = createSyncCoordinator(
+            db = db,
             api = api,
-            sessionRepository = sessionRepo,
-            cocktailDao = db.cocktailDao,
-            inventoryDao = db.inventoryDao,
-            catalogDao = db.catalogDao,
-            syncDao = db.syncDao,
-            mutationCoordinator = BarMutationCoordinator(),
+            sessionRepo = sessionRepo,
         )
 
         sessionRepo.setAuthenticatedWithoutEmittingFirst(
             SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
         )
-        assertTrue(cocktailRepo.syncAll(force = true).isSuccess)
+        assertTrue(syncCoordinator.syncAll(force = true).isSuccess)
         assertEquals(42, sessionRepo.currentUserId())
         assertEquals(
             listOf(ShoppingListEntity(barId = 7, ingredientId = 10, quantity = 2)),
@@ -659,7 +633,7 @@ class InventoryAvailabilityAndRepositoryTest {
 
         // Transient error fetching shopping list must preserve cached items instead of wiping them
         api.onGetShoppingList = { throw IllegalStateException("Timeout") }
-        assertTrue(cocktailRepo.syncAll(force = true).isSuccess)
+        assertTrue(syncCoordinator.syncAll(force = true).isSuccess)
         assertEquals(
             listOf(ShoppingListEntity(barId = 7, ingredientId = 10, quantity = 2)),
             db.inventoryDao.getShoppingListSnapshot(7),
@@ -741,31 +715,31 @@ class InventoryAvailabilityAndRepositoryTest {
         val sessionRepo = FakeSessionRepository(
             SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
         )
-        val cocktailRepo = DefaultCocktailRepository(
+        val syncCoordinator = createSyncCoordinator(
+            db = db,
             api = api,
-            sessionRepository = sessionRepo,
-            cocktailDao = db.cocktailDao,
-            inventoryDao = db.inventoryDao,
-            catalogDao = db.catalogDao,
-            syncDao = db.syncDao,
-            mutationCoordinator = coordinator,
+            sessionRepo = sessionRepo,
+            coordinator = coordinator,
         )
-        val inventoryRepo = DefaultInventoryRepository(
+        val cocktailRepo = createCocktailRepository(
+            db = db,
             api = api,
-            sessionRepository = sessionRepo,
-            cocktailRepository = cocktailRepo,
-            cocktailDao = db.cocktailDao,
-            inventoryDao = db.inventoryDao,
-            catalogDao = db.catalogDao,
-            syncDao = db.syncDao,
-            mutationCoordinator = coordinator,
+            sessionRepo = sessionRepo,
+            coordinator = coordinator,
+        )
+        val inventoryRepo = createInventoryRepository(
+            db = db,
+            api = api,
+            sessionRepo = sessionRepo,
+            syncCoordinator = syncCoordinator,
+            coordinator = coordinator,
         )
 
         // Let initial auto-sync settle before gating the explicit syncAll(force = true) call
-        assertTrue(cocktailRepo.syncAll(force = false).isSuccess)
+        assertTrue(syncCoordinator.syncAll(force = false).isSuccess)
         armGate = true
 
-        val syncDeferred = async { cocktailRepo.syncAll(force = true) }
+        val syncDeferred = async { syncCoordinator.syncAll(force = true) }
         syncEnteredFetch.await()
 
         // Shopping list write happens while syncAll() is fetching the old empty shopping list
@@ -788,7 +762,7 @@ class InventoryAvailabilityAndRepositoryTest {
         assertTrue(cocktailsImmediately.single().cocktail.isFavorite)
         assertTrue(cocktailsImmediately.single().cocktail.inBarShelf)
 
-        inventoryRepo.lastBackgroundSyncJob?.join()
+        syncCoordinator.lastBackgroundSyncJob?.join()
         val cocktailsAfter = db.cocktailDao.getCocktailsWithIngredientsForBar(7)
         assertEquals(listOf(10), cocktailsAfter.map { it.cocktail.id })
         assertTrue(cocktailsAfter.single().cocktail.isFavorite)
@@ -858,16 +832,12 @@ class InventoryAvailabilityAndRepositoryTest {
                 }
             }
         }
-        val cocktailRepo = FakeCocktailRepository()
-        val repo = DefaultInventoryRepository(
+        val syncCoordinator = FakeBarSyncCoordinator()
+        val repo = createInventoryRepository(
+            db = db,
             api = api,
-            sessionRepository = sessionRepo,
-            cocktailRepository = cocktailRepo,
-            cocktailDao = db.cocktailDao,
-            inventoryDao = db.inventoryDao,
-            catalogDao = db.catalogDao,
-            syncDao = db.syncDao,
-            mutationCoordinator = BarMutationCoordinator(),
+            sessionRepo = sessionRepo,
+            syncCoordinator = syncCoordinator,
         )
 
         assertTrue(repo.addToShoppingList(listOf(5), quantity = 1).isSuccess)
@@ -880,11 +850,90 @@ class InventoryAvailabilityAndRepositoryTest {
         assertEquals(listOf(5), repo.getRecommendedIngredients().getOrThrow().map { it.id })
         assertEquals(listOf(101), repo.getUnlockedCocktails(5).getOrThrow().map { it.id })
 
-        // Background sync uses syncAllSilent and cancels on logout
+        // Background sync schedules syncAllSilent via BarSyncCoordinator with matching originEpoch
+        val expectedEpoch = sessionRepo.currentSessionEpoch()
         assertTrue(repo.setInBarShelf(listOf(5), inStock = true).isSuccess)
+        assertEquals(listOf(expectedEpoch), syncCoordinator.scheduledOriginEpochs)
+        syncCoordinator.lastBackgroundSyncJob?.join()
+        assertEquals(listOf(true), syncCoordinator.silentSyncForceCalls)
+    }
+
+    @Test
+    fun `DefaultBarSyncCoordinator cancels background sync on logout and bar switch`() = runTest {
+        val db = FakeBarDatabase()
+        val fetchEntered = CompletableDeferred<Unit>()
+        val allowFetchComplete = CompletableDeferred<Unit>()
+        var blockFetch = false
+        val api = FakeBarAssistantApi().apply {
+            onGetCocktails = {
+                if (blockFetch) {
+                    fetchEntered.complete(Unit)
+                    allowFetchComplete.await()
+                }
+                emptyList()
+            }
+        }
+        val sessionRepo = FakeSessionRepository(SessionState.Unauthenticated())
+        val syncCoordinator = createSyncCoordinator(
+            db = db,
+            api = api,
+            sessionRepo = sessionRepo,
+        )
+
+        sessionRepo.setAuthenticatedWithoutEmittingFirst(
+            SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
+        )
+        assertTrue(syncCoordinator.syncAll(force = false).isSuccess)
+
+        // Background sync cancelled on logout
+        blockFetch = true
+        syncCoordinator.scheduleBackgroundSync(sessionRepo.currentSessionEpoch())
+        fetchEntered.await()
+        val firstJob = syncCoordinator.lastBackgroundSyncJob
         sessionRepo.clearSession()
-        repo.lastBackgroundSyncJob?.join()
-        assertEquals(null, cocktailRepo.syncStatus.value.errorMessage)
+        firstJob?.join()
+        assertTrue(firstJob?.isCancelled == true)
+        assertEquals(SyncStatus(), syncCoordinator.syncStatus.value)
+
+        // Background sync cancelled on bar switch
+        val secondFetchEntered = CompletableDeferred<Unit>()
+        blockFetch = false
+        sessionRepo.saveSession("https://bar.example.com", "1|token", barId = 7, barName = "Home", userId = 42)
+        assertTrue(syncCoordinator.syncAll(force = true).isSuccess)
+
+        api.onGetCocktails = {
+            secondFetchEntered.complete(Unit)
+            CompletableDeferred<List<CocktailDto>>().await()
+        }
+        syncCoordinator.scheduleBackgroundSync(sessionRepo.currentSessionEpoch())
+        secondFetchEntered.await()
+        val secondJob = syncCoordinator.lastBackgroundSyncJob
+        sessionRepo.saveSession("https://bar.example.com", "1|token", barId = 8, barName = "Tiki", userId = 42)
+        secondJob?.join()
+        assertTrue(secondJob?.isCancelled == true)
+    }
+
+    @Test
+    fun `RoomBarLocalDataSource observeCatalog and observeBarShelfIngredients emit consistent ingredient summaries`() = runTest {
+        val db = FakeBarDatabase()
+        db.seedIngredient(barId = 7, id = 1, slug = "gin", name = "London Dry Gin", categoryName = "Spirit")
+        db.seedIngredient(barId = 7, id = 2, slug = "campari", name = "Campari", categoryName = "Amaro")
+        val localDataSource = createLocalDataSource(db)
+
+        db.inventoryDao.upsertBarShelfItems(listOf(BarShelfEntity(barId = 7, ingredientId = 1)))
+        db.inventoryDao.upsertShoppingListItems(listOf(ShoppingListEntity(barId = 7, ingredientId = 2, quantity = 1)))
+
+        assertEquals(
+            localDataSource.observeBarShelfIngredients(7).first(),
+            localDataSource.observeCatalog(7).first().ingredients,
+        )
+
+        db.inventoryDao.deleteBarShelfItems(7, listOf(1))
+        db.inventoryDao.upsertBarShelfItems(listOf(BarShelfEntity(barId = 7, ingredientId = 2)))
+        assertEquals(
+            localDataSource.observeBarShelfIngredients(7).first(),
+            localDataSource.observeCatalog(7).first().ingredients,
+        )
     }
 
     @Test
@@ -893,42 +942,39 @@ class InventoryAvailabilityAndRepositoryTest {
         val coordinator = BarMutationCoordinator()
         val api = FakeBarAssistantApi()
         val sessionRepo = FakeSessionRepository(SessionState.Unauthenticated())
-        val cocktailRepo = DefaultCocktailRepository(
+        val syncCoordinator = createSyncCoordinator(
+            db = db,
             api = api,
-            sessionRepository = sessionRepo,
-            cocktailDao = db.cocktailDao,
-            inventoryDao = db.inventoryDao,
-            catalogDao = db.catalogDao,
-            syncDao = db.syncDao,
-            mutationCoordinator = coordinator,
+            sessionRepo = sessionRepo,
+            coordinator = coordinator,
         )
         sessionRepo.setAuthenticatedWithoutEmittingFirst(
             SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
         )
-        assertTrue(cocktailRepo.syncAll(force = false).isSuccess)
+        assertTrue(syncCoordinator.syncAll(force = false).isSuccess)
 
         // Failed interactive sync publishes errorMessage
         api.onGetCocktails = { throw IllegalStateException("Offline") }
-        assertTrue(cocktailRepo.syncAll(force = true).isFailure)
-        assertEquals("Offline", cocktailRepo.syncStatus.value.errorMessage)
+        assertTrue(syncCoordinator.syncAll(force = true).isFailure)
+        assertEquals("Offline", syncCoordinator.syncStatus.value.errorMessage)
 
         // Successful silent sync clears prior errorMessage and updates timestamp
         api.onGetCocktails = { emptyList() }
-        assertTrue(cocktailRepo.syncAllSilent(force = true).isSuccess)
-        assertNull(cocktailRepo.syncStatus.value.errorMessage)
-        assertTrue((cocktailRepo.syncStatus.value.lastSyncedEpochMillis ?: 0L) > 0L)
+        assertTrue(syncCoordinator.syncAllSilent(force = true).isSuccess)
+        assertNull(syncCoordinator.syncStatus.value.errorMessage)
+        assertTrue((syncCoordinator.syncStatus.value.lastSyncedEpochMillis ?: 0L) > 0L)
 
         // Silent sync that fails or skips snapshot write preserves previous error status
         api.onGetCocktails = { throw IllegalStateException("Timeout") }
-        assertTrue(cocktailRepo.syncAll(force = true).isFailure)
-        assertEquals("Timeout", cocktailRepo.syncStatus.value.errorMessage)
+        assertTrue(syncCoordinator.syncAll(force = true).isFailure)
+        assertEquals("Timeout", syncCoordinator.syncStatus.value.errorMessage)
 
         api.onGetCocktails = {
             coordinator.withMutationLock { coordinator.bumpGenerationLocked() }
             emptyList()
         }
-        assertTrue(cocktailRepo.syncAllSilent(force = true).isSuccess)
-        assertEquals("Timeout", cocktailRepo.syncStatus.value.errorMessage)
+        assertTrue(syncCoordinator.syncAllSilent(force = true).isSuccess)
+        assertEquals("Timeout", syncCoordinator.syncStatus.value.errorMessage)
     }
 
     private fun applyAvailabilityRecalculation(
@@ -1042,15 +1088,62 @@ class InventoryAvailabilityAndRepositoryTest {
         }
     }
 
-    private class FakeCocktailRepository : CocktailRepository {
+    private fun createLocalDataSource(db: FakeBarDatabase): BarLocalDataSource =
+        RoomBarLocalDataSource(
+            cocktailDao = db.cocktailDao,
+            inventoryDao = db.inventoryDao,
+            catalogDao = db.catalogDao,
+            syncDao = db.syncDao,
+        )
+
+    private fun createSyncCoordinator(
+        db: FakeBarDatabase,
+        api: BarAssistantApi,
+        sessionRepo: SessionRepository,
+        coordinator: BarMutationCoordinator = BarMutationCoordinator(),
+    ): DefaultBarSyncCoordinator = DefaultBarSyncCoordinator(
+        remoteDataSource = DefaultBarRemoteDataSource(api, sessionRepo),
+        localDataSource = createLocalDataSource(db),
+        sessionRepository = sessionRepo,
+        mutationCoordinator = coordinator,
+    )
+
+    private fun createCocktailRepository(
+        db: FakeBarDatabase,
+        api: BarAssistantApi,
+        sessionRepo: SessionRepository,
+        coordinator: BarMutationCoordinator = BarMutationCoordinator(),
+    ): DefaultCocktailRepository = DefaultCocktailRepository(
+        localDataSource = createLocalDataSource(db),
+        remoteDataSource = DefaultBarRemoteDataSource(api, sessionRepo),
+        sessionRepository = sessionRepo,
+        mutationCoordinator = coordinator,
+    )
+
+    private fun createInventoryRepository(
+        db: FakeBarDatabase,
+        api: BarAssistantApi,
+        sessionRepo: SessionRepository,
+        syncCoordinator: BarSyncCoordinator = FakeBarSyncCoordinator(),
+        coordinator: BarMutationCoordinator = BarMutationCoordinator(),
+    ): DefaultInventoryRepository = DefaultInventoryRepository(
+        localDataSource = createLocalDataSource(db),
+        remoteDataSource = DefaultBarRemoteDataSource(api, sessionRepo),
+        sessionRepository = sessionRepo,
+        syncCoordinator = syncCoordinator,
+        mutationCoordinator = coordinator,
+    )
+
+    private class FakeBarSyncCoordinator : BarSyncCoordinator {
         private val _syncStatus = MutableStateFlow(SyncStatus())
         override val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
+        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val syncForceCalls = mutableListOf<Boolean>()
         val silentSyncForceCalls = mutableListOf<Boolean>()
+        val scheduledOriginEpochs = mutableListOf<Long>()
 
-        override fun observeCocktails(filter: CocktailFilter): Flow<List<CocktailSummary>> = flowOf(emptyList())
-        override fun observeCocktailDetail(cocktailId: Int): Flow<CocktailDetail?> = flowOf(null)
-        override fun observeCatalog(): Flow<BarCatalog> = flowOf(BarCatalog())
+        @Volatile
+        var lastBackgroundSyncJob: Job? = null
 
         override suspend fun syncAll(force: Boolean): Result<Unit> {
             syncForceCalls += force
@@ -1062,33 +1155,13 @@ class InventoryAvailabilityAndRepositoryTest {
             return Result.success(Unit)
         }
 
-        override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> =
-            Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun toggleFavorite(cocktailId: Int): Result<Boolean> =
-            Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun saveCocktail(cocktailId: Int?, request: CocktailUpsertRequest): Result<CocktailDetail> =
-            Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun deleteCocktail(cocktailId: Int): Result<Unit> =
-            Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun uploadImage(
-            bytes: ByteArray,
-            fileName: String,
-            mimeType: String?,
-            sort: Int,
-        ): Result<UploadedImage> = Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun uploadImageFromUrl(
-            imageUrl: String,
-            copyright: String?,
-            sort: Int,
-        ): Result<UploadedImage> = Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun scrapeRecipeFromUrl(url: String): Result<ScrapedCocktail> =
-            Result.failure(IllegalStateException("Unused"))
+        override fun scheduleBackgroundSync(originEpoch: Long) {
+            scheduledOriginEpochs += originEpoch
+            lastBackgroundSyncJob?.cancel()
+            lastBackgroundSyncJob = scope.launch {
+                syncAllSilent(force = true)
+            }
+        }
     }
 
     private class FakeBarAssistantApi(

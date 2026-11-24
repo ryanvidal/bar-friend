@@ -5,20 +5,13 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import com.ryanvidal.barfriend.core.data.AppPreferences
 import com.ryanvidal.barfriend.core.data.AuthRepository
-import com.ryanvidal.barfriend.core.data.CocktailRepository
+import com.ryanvidal.barfriend.core.data.BarSyncCoordinator
 import com.ryanvidal.barfriend.core.data.ServerCheckResult
 import com.ryanvidal.barfriend.core.data.SessionRepository
 import com.ryanvidal.barfriend.core.data.SessionState
 import com.ryanvidal.barfriend.core.data.SyncStatus
 import com.ryanvidal.barfriend.core.model.AppThemeMode
 import com.ryanvidal.barfriend.core.model.Bar
-import com.ryanvidal.barfriend.core.model.BarCatalog
-import com.ryanvidal.barfriend.core.model.CocktailDetail
-import com.ryanvidal.barfriend.core.model.CocktailFilter
-import com.ryanvidal.barfriend.core.model.CocktailSummary
-import com.ryanvidal.barfriend.core.model.CocktailUpsertRequest
-import com.ryanvidal.barfriend.core.model.ScrapedCocktail
-import com.ryanvidal.barfriend.core.model.UploadedImage
 import com.ryanvidal.barfriend.core.model.VolumeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -26,7 +19,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -65,14 +57,14 @@ class SettingsViewModelTest {
                 activeBarName = "Speakeasy",
             ),
         )
-        val cocktailRepository = FakeCocktailRepository(
+        val syncCoordinator = FakeBarSyncCoordinator(
             SyncStatus(isSyncing = false, lastSyncedEpochMillis = 1_700_000_000_000L),
         )
         val viewModel = SettingsViewModel(
             appPreferences = preferences,
             sessionRepository = sessionRepository,
             authRepository = FakeAuthRepository(),
-            cocktailRepository = cocktailRepository,
+            syncCoordinator = syncCoordinator,
         )
 
         advanceUntilIdle()
@@ -93,7 +85,7 @@ class SettingsViewModelTest {
             appPreferences = preferences,
             sessionRepository = FakeSessionRepository(),
             authRepository = FakeAuthRepository(),
-            cocktailRepository = FakeCocktailRepository(),
+            syncCoordinator = FakeBarSyncCoordinator(),
         )
 
         viewModel.setPreferredUnit(VolumeUnit.CL)
@@ -107,18 +99,18 @@ class SettingsViewModelTest {
 
     @Test
     fun `syncNow invokes force sync and reflects updated syncStatus`() = runTest(testDispatcher) {
-        val cocktailRepository = FakeCocktailRepository()
+        val syncCoordinator = FakeBarSyncCoordinator()
         val viewModel = SettingsViewModel(
             appPreferences = AppPreferences(FakePreferencesDataStore()),
             sessionRepository = FakeSessionRepository(),
             authRepository = FakeAuthRepository(),
-            cocktailRepository = cocktailRepository,
+            syncCoordinator = syncCoordinator,
         )
 
         viewModel.syncNow()
         advanceUntilIdle()
 
-        assertEquals(listOf(true), cocktailRepository.syncForceCalls)
+        assertEquals(listOf(true), syncCoordinator.syncForceCalls)
         assertEquals(1_800_000_000_000L, viewModel.uiState.value.syncStatus.lastSyncedEpochMillis)
     }
 
@@ -137,7 +129,7 @@ class SettingsViewModelTest {
             appPreferences = AppPreferences(FakePreferencesDataStore()),
             sessionRepository = sessionRepository,
             authRepository = authRepository,
-            cocktailRepository = FakeCocktailRepository(),
+            syncCoordinator = FakeBarSyncCoordinator(),
         )
 
         viewModel.signOut()
@@ -160,7 +152,7 @@ class SettingsViewModelTest {
             appPreferences = AppPreferences(FakePreferencesDataStore()),
             sessionRepository = FakeSessionRepository(),
             authRepository = authRepository,
-            cocktailRepository = FakeCocktailRepository(),
+            syncCoordinator = FakeBarSyncCoordinator(),
         )
 
         viewModel.signOut()
@@ -173,21 +165,21 @@ class SettingsViewModelTest {
 
     @Test
     fun `syncNow surfaces Result failure in uiState errorMessage`() = runTest(testDispatcher) {
-        val cocktailRepository = FakeCocktailRepository().apply {
+        val syncCoordinator = FakeBarSyncCoordinator().apply {
             syncResult = Result.failure(IllegalStateException("Server unreachable"))
         }
         val viewModel = SettingsViewModel(
             appPreferences = AppPreferences(FakePreferencesDataStore()),
             sessionRepository = FakeSessionRepository(),
             authRepository = FakeAuthRepository(),
-            cocktailRepository = cocktailRepository,
+            syncCoordinator = syncCoordinator,
         )
 
         viewModel.syncNow()
         advanceUntilIdle()
         assertEquals("Server unreachable", viewModel.uiState.value.errorMessage)
 
-        cocktailRepository.syncResult = Result.failure(IllegalStateException())
+        syncCoordinator.syncResult = Result.failure(IllegalStateException())
         viewModel.syncNow()
         advanceUntilIdle()
         assertEquals("Sync failed.", viewModel.uiState.value.errorMessage)
@@ -202,7 +194,7 @@ class SettingsViewModelTest {
             appPreferences = AppPreferences(dataStore),
             sessionRepository = FakeSessionRepository(),
             authRepository = FakeAuthRepository(),
-            cocktailRepository = FakeCocktailRepository(),
+            syncCoordinator = FakeBarSyncCoordinator(),
         )
 
         viewModel.setPreferredUnit(VolumeUnit.ML)
@@ -275,22 +267,13 @@ class SettingsViewModelTest {
         }
     }
 
-    private class FakeCocktailRepository(
+    private class FakeBarSyncCoordinator(
         initialStatus: SyncStatus = SyncStatus(),
-    ) : CocktailRepository {
+    ) : BarSyncCoordinator {
         private val _syncStatus = MutableStateFlow(initialStatus)
         override val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
         val syncForceCalls = mutableListOf<Boolean>()
         var syncResult: Result<Unit> = Result.success(Unit)
-
-        override fun observeCocktails(filter: CocktailFilter): Flow<List<CocktailSummary>> =
-            flowOf(emptyList())
-
-        override fun observeCocktailDetail(cocktailId: Int): Flow<CocktailDetail?> =
-            flowOf(null)
-
-        override fun observeCatalog(): Flow<BarCatalog> =
-            flowOf(BarCatalog())
 
         override suspend fun syncAll(force: Boolean): Result<Unit> {
             syncForceCalls += force
@@ -299,35 +282,5 @@ class SettingsViewModelTest {
             }
             return syncResult
         }
-
-        override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> =
-            Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun toggleFavorite(cocktailId: Int): Result<Boolean> =
-            Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun saveCocktail(
-            cocktailId: Int?,
-            request: CocktailUpsertRequest,
-        ): Result<CocktailDetail> = Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun deleteCocktail(cocktailId: Int): Result<Unit> =
-            Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun uploadImage(
-            bytes: ByteArray,
-            fileName: String,
-            mimeType: String?,
-            sort: Int,
-        ): Result<UploadedImage> = Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun uploadImageFromUrl(
-            imageUrl: String,
-            copyright: String?,
-            sort: Int,
-        ): Result<UploadedImage> = Result.failure(IllegalStateException("Unused"))
-
-        override suspend fun scrapeRecipeFromUrl(url: String): Result<ScrapedCocktail> =
-            Result.failure(IllegalStateException("Unused"))
     }
 }

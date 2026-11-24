@@ -2,7 +2,7 @@ package com.ryanvidal.barfriend.feature.inventory
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.ryanvidal.barfriend.core.data.CocktailRepository
+import com.ryanvidal.barfriend.core.data.BarSyncCoordinator
 import com.ryanvidal.barfriend.core.data.InventoryRepository
 import com.ryanvidal.barfriend.core.data.SyncStatus
 import com.ryanvidal.barfriend.core.model.IngredientSummary
@@ -144,7 +144,7 @@ private data class InventoryDataSnapshot(
 @Inject
 class InventoryViewModel(
     private val inventoryRepository: InventoryRepository,
-    private val cocktailRepository: CocktailRepository,
+    private val syncCoordinator: BarSyncCoordinator,
 ) : ViewModel() {
     private val interaction = MutableStateFlow(InventoryInteractionState())
 
@@ -175,7 +175,7 @@ class InventoryViewModel(
     private val dataFlow: Flow<InventoryDataSnapshot> = combine(
         barShelfIngredientsFlow,
         shoppingListFlow,
-        cocktailRepository.syncStatus,
+        syncCoordinator.syncStatus,
     ) { catalogIngredients, shoppingList, syncStatus ->
         val barShelfIds = catalogIngredients.asSequence()
             .filter { it.inBarShelf }
@@ -442,7 +442,7 @@ class InventoryViewModel(
         }
         viewModelScope.launch {
             try {
-                val syncResult = cocktailRepository.syncAll(force = true)
+                val syncResult = syncCoordinator.syncAll(force = true)
                 if (syncResult.isSuccess) {
                     val shoppingResult = inventoryRepository.syncShoppingList()
                     shoppingResult.onFailure { error ->
@@ -452,7 +452,7 @@ class InventoryViewModel(
                     launchRecommendationsLoad().join()
                 } else {
                     val syncError = syncResult.exceptionOrNull()?.message?.takeIf { it.isNotBlank() }
-                    if (cocktailRepository.syncStatus.value.errorMessage == null) {
+                    if (syncCoordinator.syncStatus.value.errorMessage == null) {
                         emitSnackbar(syncError ?: "Sync failed.")
                     }
                 }

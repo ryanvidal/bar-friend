@@ -2,6 +2,7 @@ package com.ryanvidal.barfriend.feature.cocktails
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ryanvidal.barfriend.core.data.BarSyncCoordinator
 import com.ryanvidal.barfriend.core.data.CocktailRepository
 import com.ryanvidal.barfriend.core.data.SyncStatus
 import com.ryanvidal.barfriend.core.model.BarCatalog
@@ -33,6 +34,7 @@ data class CocktailsListUiState(
 @Inject
 class CocktailsListViewModel(
     private val cocktailRepository: CocktailRepository,
+    private val syncCoordinator: BarSyncCoordinator,
 ) : ViewModel() {
     private val filter = MutableStateFlow(CocktailFilter())
     private val favoriteInFlightIds = MutableStateFlow<Set<Int>>(emptySet())
@@ -56,7 +58,7 @@ class CocktailsListViewModel(
         ) { currentFilter, cocktails, catalog ->
             Triple(currentFilter, cocktails, catalog)
         },
-        cocktailRepository.syncStatus,
+        syncCoordinator.syncStatus,
         favoriteInFlightIds,
         actionErrorMessage,
     ) { (currentFilter, cocktails, catalog), syncStatus, inFlightFavorites, error ->
@@ -129,7 +131,7 @@ class CocktailsListViewModel(
 
     fun refresh() {
         viewModelScope.launch {
-            cocktailRepository.syncAll(force = true)
+            syncCoordinator.syncAll(force = true)
         }
     }
 
