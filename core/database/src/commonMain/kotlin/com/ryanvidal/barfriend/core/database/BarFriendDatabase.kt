@@ -8,6 +8,7 @@ import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.ryanvidal.barfriend.core.database.dao.CatalogDao
 import com.ryanvidal.barfriend.core.database.dao.CocktailDao
 import com.ryanvidal.barfriend.core.database.dao.InventoryDao
+import com.ryanvidal.barfriend.core.database.dao.SyncDao
 import com.ryanvidal.barfriend.core.database.entity.BarShelfEntity
 import com.ryanvidal.barfriend.core.database.entity.CocktailEntity
 import com.ryanvidal.barfriend.core.database.entity.CocktailIngredientEntity
@@ -49,6 +50,7 @@ abstract class BarFriendDatabase : RoomDatabase() {
     abstract fun cocktailDao(): CocktailDao
     abstract fun inventoryDao(): InventoryDao
     abstract fun catalogDao(): CatalogDao
+    abstract fun syncDao(): SyncDao
 }
 
 @Suppress("KotlinNoActualForExpect")
@@ -86,4 +88,7 @@ object DatabaseBindings {
 
     @Provides
     fun provideCatalogDao(database: BarFriendDatabase): CatalogDao = database.catalogDao()
+
+    @Provides
+    fun provideSyncDao(database: BarFriendDatabase): SyncDao = database.syncDao()
 }

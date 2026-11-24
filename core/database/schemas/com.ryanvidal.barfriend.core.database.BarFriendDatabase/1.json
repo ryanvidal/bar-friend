@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 1,
-    "identityHash": "a1ca7a31db39619b9eb2d308c7320bcd",
+    "identityHash": "cddc51ec3320c0befc81dafcd15a07e1",
     "entities": [
       {
         "tableName": "cocktails",
@@ -187,7 +187,7 @@
       },
       {
         "tableName": "cocktail_ingredients",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`cocktailId` INTEGER NOT NULL, `ingredientId` INTEGER NOT NULL, `ingredientSlug` TEXT NOT NULL, `ingredientName` TEXT NOT NULL, `sort` INTEGER NOT NULL, `amount` REAL, `amountMax` REAL, `units` TEXT, `optional` INTEGER NOT NULL, `note` TEXT, `inBarShelf` INTEGER NOT NULL, `inBarShelfAsSubstitute` INTEGER NOT NULL, `inBarShelfAsVariant` INTEGER NOT NULL, `inBarShelfAsComplex` INTEGER NOT NULL, `substitutesJson` TEXT NOT NULL, PRIMARY KEY(`cocktailId`, `ingredientId`, `sort`), FOREIGN KEY(`cocktailId`) REFERENCES `cocktails`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`cocktailId` INTEGER NOT NULL, `ingredientId` INTEGER NOT NULL, `ingredientSlug` TEXT NOT NULL, `ingredientName` TEXT NOT NULL, `sort` INTEGER NOT NULL, `amount` REAL, `amountMax` REAL, `units` TEXT, `optional` INTEGER NOT NULL, `note` TEXT, `inBarShelf` INTEGER NOT NULL, `inBarShelfAsSubstitute` INTEGER NOT NULL, `inBarShelfAsVariant` INTEGER NOT NULL, `inBarShelfAsComplex` INTEGER NOT NULL, `substitutesJson` TEXT NOT NULL, `isSpecified` INTEGER NOT NULL, PRIMARY KEY(`cocktailId`, `ingredientId`, `sort`), FOREIGN KEY(`cocktailId`) REFERENCES `cocktails`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         "fields": [
           {
             "fieldPath": "cocktailId",
@@ -273,6 +273,12 @@
             "fieldPath": "substitutesJson",
             "columnName": "substitutesJson",
             "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isSpecified",
+            "columnName": "isSpecified",
+            "affinity": "INTEGER",
             "notNull": true
           }
         ],
@@ -659,7 +665,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'a1ca7a31db39619b9eb2d308c7320bcd')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'cddc51ec3320c0befc81dafcd15a07e1')"
     ]
   }
 }

@@ -71,6 +71,7 @@ data class CocktailIngredientEntity(
     val inBarShelfAsVariant: Boolean,
     val inBarShelfAsComplex: Boolean,
     val substitutesJson: String,
+    val isSpecified: Boolean = false,
 )
 
 @Entity(

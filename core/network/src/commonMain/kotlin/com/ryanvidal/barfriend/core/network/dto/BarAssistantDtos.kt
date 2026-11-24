@@ -132,6 +132,7 @@ data class CocktailIngredientDto(
     @SerialName("in_bar_shelf_as_substitute") val inBarShelfAsSubstitute: Boolean = false,
     @SerialName("in_bar_shelf_as_complex_ingredient") val inBarShelfAsComplexIngredient: Boolean = false,
     @SerialName("in_bar_shelf_as_variant") val inBarShelfAsVariant: Boolean = false,
+    @SerialName("is_specified") val isSpecified: Boolean = false,
 )
 
 @Serializable

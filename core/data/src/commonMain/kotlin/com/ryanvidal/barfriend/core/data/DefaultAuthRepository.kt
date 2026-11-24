@@ -14,6 +14,7 @@ import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 @SingleIn(AppScope::class)
 @ContributesBinding(AppScope::class)
@@ -27,8 +28,8 @@ class DefaultAuthRepository(
         if (serverUrl.isBlank()) {
             return ServerCheckResult.Error("Please enter a Bar Assistant server URL.")
         }
-        val normalized = ServerUrlNormalizer.normalize(serverUrl)
         return try {
+            val normalized = ServerUrlNormalizer.normalize(serverUrl)
             val dto = api.getServerVersion(normalized)
             when (ServerVersionValidator.validate(dto.version)) {
                 is ServerCompatibility.Unsupported -> ServerCheckResult.UnsupportedVersion(
@@ -79,7 +80,14 @@ class DefaultAuthRepository(
             return Result.failure(IllegalArgumentException("Password is required."))
         }
 
-        val normalized = ServerUrlNormalizer.normalize(serverUrl)
+        val normalized = try {
+            ServerUrlNormalizer.normalize(serverUrl)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            return Result.failure(e)
+        }
+
         when (val check = checkServer(normalized)) {
             is ServerCheckResult.Compatible -> Unit
             is ServerCheckResult.UnsupportedVersion -> return Result.failure(
@@ -103,25 +111,22 @@ class DefaultAuthRepository(
             return Result.failure(e)
         }
 
-        sessionRepository.saveSession(
-            serverUrl = normalized,
-            token = tokenDto.token,
-            barId = null,
-            barName = null,
-        )
-
         val bars = try {
-            api.getBars()
+            fetchAllPages { page ->
+                api.getBars(
+                    serverUrl = normalized,
+                    token = tokenDto.token,
+                    page = page,
+                    perPage = 100,
+                )
+            }.distinctBy { it.id }
         } catch (e: CancellationException) {
-            withContext(NonCancellable) { sessionRepository.clearSession() }
             throw e
         } catch (e: Throwable) {
-            sessionRepository.clearSession()
             return Result.failure(e)
         }
 
         if (bars.isEmpty()) {
-            sessionRepository.clearSession()
             return Result.failure(IllegalStateException("No bars were found for this account."))
         }
 
@@ -146,13 +151,27 @@ class DefaultAuthRepository(
     }
 
     override suspend fun signOut(): Result<Unit> = try {
-        runCatching { api.logout() }
-            .onFailure { if (it is CancellationException) throw it }
-        sessionRepository.clearSession()
+        withTimeoutOrNull(LOGOUT_TIMEOUT_MILLIS) {
+            runCatching { api.logout() }
+                .onFailure { if (it is CancellationException) throw it }
+        }
+        withContext(NonCancellable) {
+            sessionRepository.clearSession()
+        }
         Result.success(Unit)
     } catch (e: CancellationException) {
+        withContext(NonCancellable) {
+            sessionRepository.clearSession()
+        }
         throw e
     } catch (e: Throwable) {
+        withContext(NonCancellable) {
+            sessionRepository.clearSession()
+        }
         Result.failure(e)
+    }
+
+    private companion object {
+        const val LOGOUT_TIMEOUT_MILLIS = 3_000L
     }
 }

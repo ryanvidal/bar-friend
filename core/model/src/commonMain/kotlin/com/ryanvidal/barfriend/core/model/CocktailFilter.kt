@@ -28,6 +28,16 @@ data class CocktailFilter(
             abvMax,
             sort.takeIf { it != CocktailSort.NAME_ASC },
         ).size
+
+    val hasActiveFilters: Boolean
+        get() = query.isNotBlank() ||
+            canMakeOnly ||
+            favoritesOnly ||
+            tagIds.isNotEmpty() ||
+            glassId != null ||
+            methodId != null ||
+            abvMin != null ||
+            abvMax != null
 }
 
 data class BarCatalog(

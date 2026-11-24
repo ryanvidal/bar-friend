@@ -1,9 +1,13 @@
 package com.ryanvidal.barfriend.feature.cocktails
 
+import com.ryanvidal.barfriend.core.model.BarCatalog
 import com.ryanvidal.barfriend.core.model.CocktailFilter
+import com.ryanvidal.barfriend.core.model.CocktailMethod
 import com.ryanvidal.barfriend.core.model.CocktailSort
 import com.ryanvidal.barfriend.core.model.CocktailSummary
 import com.ryanvidal.barfriend.core.model.CocktailTag
+import com.ryanvidal.barfriend.core.model.Glass
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -18,6 +22,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -76,6 +81,9 @@ class CocktailsListViewModelTest {
         }
         advanceUntilIdle()
 
+        assertFalse(CocktailFilter(sort = CocktailSort.ABV_DESC).hasActiveFilters)
+        assertTrue(CocktailFilter(query = "gin").hasActiveFilters)
+
         assertEquals(listOf("Gimlet", "Negroni"), viewModel.uiState.value.cocktails.map { it.name })
 
         viewModel.onQueryChanged("Negroni")
@@ -110,8 +118,14 @@ class CocktailsListViewModelTest {
     }
 
     @Test
-    fun `toggles favorite and triggers forced refresh`() = runTest(testDispatcher) {
-        val repository = FakeCocktailRepository(initialCocktails = sampleSummaries())
+    fun `guards per-cocktail favorite double taps while allowing concurrent taps on other cocktails`() = runTest(testDispatcher) {
+        val gates = mapOf(
+            1 to CompletableDeferred<Unit>(),
+            2 to CompletableDeferred<Unit>(),
+        )
+        val repository = FakeCocktailRepository(initialCocktails = sampleSummaries()).apply {
+            toggleFavoriteSuspendHook = { id -> gates.getValue(id).await() }
+        }
         val viewModel = CocktailsListViewModel(repository)
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -119,13 +133,58 @@ class CocktailsListViewModelTest {
         advanceUntilIdle()
 
         viewModel.toggleFavorite(2)
+        viewModel.toggleFavorite(2)
+        viewModel.toggleFavorite(1)
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(listOf(2, 1), repository.toggledFavoriteIds)
+        assertEquals(setOf(2, 1), viewModel.uiState.value.favoriteInFlightIds)
+
+        gates.getValue(2).complete(Unit)
+        gates.getValue(1).complete(Unit)
         advanceUntilIdle()
-        assertEquals(listOf(2), repository.toggledFavoriteIds)
+
+        assertTrue(viewModel.uiState.value.favoriteInFlightIds.isEmpty())
         assertTrue(viewModel.uiState.value.cocktails.first { it.id == 2 }.isFavorite)
+        assertFalse(viewModel.uiState.value.cocktails.first { it.id == 1 }.isFavorite)
 
         viewModel.refresh()
         advanceUntilIdle()
         assertEquals(1, repository.syncAllCalls)
         assertFalse(viewModel.uiState.value.syncStatus.isSyncing)
+    }
+
+    @Test
+    fun `drops stale tag, glass, and method filters when bar catalog updates`() = runTest(testDispatcher) {
+        val repository = FakeCocktailRepository(initialCocktails = sampleSummaries())
+        val viewModel = CocktailsListViewModel(repository)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        advanceUntilIdle()
+
+        viewModel.updateFilter(
+            CocktailFilter(
+                tagIds = setOf(30, 32),
+                glassId = 11,
+                methodId = 21,
+            ),
+        )
+        advanceUntilIdle()
+
+        // Switch bar catalog: keep tag 30 and method 21, remove tag 32 and glass 11
+        repository.setCatalog(
+            BarCatalog(
+                glasses = listOf(Glass(10, "Rocks", 250.0, "ml")),
+                methods = listOf(CocktailMethod(21, "Shake", 25)),
+                tags = listOf(CocktailTag(30, "Classic")),
+            ),
+        )
+        advanceUntilIdle()
+
+        val prunedFilter = viewModel.uiState.value.filter
+        assertEquals(setOf(30), prunedFilter.tagIds)
+        assertNull(prunedFilter.glassId)
+        assertEquals(21, prunedFilter.methodId)
     }
 }

@@ -1,7 +1,7 @@
 package com.ryanvidal.barfriend.feature.cocktails
 
 import kotlin.math.abs
-import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 internal val EDITOR_MEASUREMENT_UNITS = listOf(
     "ml",
@@ -16,28 +16,37 @@ internal val EDITOR_MEASUREMENT_UNITS = listOf(
     "piece",
 )
 
+private const val MAX_FORMATTABLE_NUMERIC_ABS = 9e15
+private const val MAX_FORMATTABLE_ABV_ABS = 9e17
+
 internal fun formatAbv(abv: Double): String {
-    val tenths = (abv * 10.0).roundToInt()
-    val whole = tenths / 10
-    val remainder = abs(tenths % 10)
-    return if (remainder == 0) {
-        "$whole% ABV"
+    if (!abv.isFinite() || abs(abv) > MAX_FORMATTABLE_ABV_ABS) return ""
+    val tenths = (abv * 10.0).roundToLong()
+    if (tenths == 0L) return "0% ABV"
+    val sign = if (tenths < 0L) "-" else ""
+    val absTenths = abs(tenths)
+    val whole = absTenths / 10L
+    val remainder = absTenths % 10L
+    return if (remainder == 0L) {
+        "$sign$whole% ABV"
     } else {
-        "$whole.$remainder% ABV"
+        "$sign$whole.$remainder% ABV"
     }
 }
 
 internal fun formatNumericInput(value: Double): String {
-    val rounded = (value * 100.0).roundToInt() / 100.0
-    val asInt = rounded.toInt()
-    if (abs(rounded - asInt) < 1e-6) {
-        return asInt.toString()
-    }
-    val text = rounded.toString()
-    return if (text.contains('.')) {
-        text.trimEnd('0').trimEnd('.')
+    if (!value.isFinite() || abs(value) > MAX_FORMATTABLE_NUMERIC_ABS) return ""
+    val thousandths = (value * 1000.0).roundToLong()
+    if (thousandths == 0L) return "0"
+    val sign = if (thousandths < 0L) "-" else ""
+    val absThousandths = abs(thousandths)
+    val whole = absThousandths / 1000L
+    val remainder = absThousandths % 1000L
+    return if (remainder == 0L) {
+        "$sign$whole"
     } else {
-        text
+        val fraction = remainder.toString().padStart(3, '0').trimEnd('0')
+        "$sign$whole.$fraction"
     }
 }
 

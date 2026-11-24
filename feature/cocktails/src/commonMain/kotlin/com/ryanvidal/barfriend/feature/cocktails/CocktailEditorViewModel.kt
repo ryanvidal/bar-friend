@@ -7,7 +7,16 @@ import com.ryanvidal.barfriend.core.model.BarCatalog
 import com.ryanvidal.barfriend.core.model.CocktailDetail
 import com.ryanvidal.barfriend.core.model.CocktailIngredientInput
 import com.ryanvidal.barfriend.core.model.CocktailUpsertRequest
+import com.ryanvidal.barfriend.core.model.IngredientSubstituteInput
 import com.ryanvidal.barfriend.core.model.IngredientSummary
+import io.github.vinceglb.filekit.FileKit
+import io.github.vinceglb.filekit.ImageFormat
+import io.github.vinceglb.filekit.PlatformFile
+import io.github.vinceglb.filekit.compressImage
+import io.github.vinceglb.filekit.name
+import io.github.vinceglb.filekit.readBytes
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,6 +24,10 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+private const val MAX_RAW_PHOTO_BYTES = 25 * 1024 * 1024
+private const val COMPRESSED_PHOTO_QUALITY = 85
+private const val COMPRESSED_PHOTO_MAX_DIMENSION = 1600
 
 data class EditorIngredientRow(
     val localKey: Long,
@@ -24,7 +37,9 @@ data class EditorIngredientRow(
     val amountMaxText: String = "",
     val units: String = "ml",
     val optional: Boolean = false,
+    val isSpecified: Boolean = false,
     val note: String = "",
+    val substitutes: List<IngredientSubstituteInput> = emptyList(),
     val unmatchedScrapedHint: String? = null,
 )
 
@@ -50,19 +65,10 @@ sealed interface EditorPhotoItem {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is PendingLocal) return false
-            return localKey == other.localKey &&
-                fileName == other.fileName &&
-                mimeType == other.mimeType &&
-                bytes.contentEquals(other.bytes)
+            return localKey == other.localKey
         }
 
-        override fun hashCode(): Int {
-            var result = localKey.hashCode()
-            result = 31 * result + bytes.contentHashCode()
-            result = 31 * result + fileName.hashCode()
-            result = 31 * result + (mimeType?.hashCode() ?: 0)
-            return result
-        }
+        override fun hashCode(): Int = localKey.hashCode()
     }
 
     data class PendingRemote(
@@ -77,8 +83,11 @@ sealed interface EditorPhotoItem {
 data class CocktailEditorUiState(
     val isEditing: Boolean = false,
     val isLoadingExisting: Boolean = false,
+    val hasLoadedExisting: Boolean = false,
     val isImporting: Boolean = false,
+    val isProcessingPhoto: Boolean = false,
     val isSaving: Boolean = false,
+    val hasUnsavedChanges: Boolean = false,
     val name: String = "",
     val instructions: String = "",
     val description: String = "",
@@ -93,6 +102,40 @@ data class CocktailEditorUiState(
     val catalog: BarCatalog = BarCatalog(),
     val errorMessage: String? = null,
     val savedCocktailId: Int? = null,
+) {
+    val isBusy: Boolean
+        get() = isSaving || isImporting || isLoadingExisting || isProcessingPhoto
+
+    val canSubmitSave: Boolean
+        get() = !isBusy && (!isEditing || hasLoadedExisting)
+}
+
+private data class EditorContentSnapshot(
+    val name: String = "",
+    val instructions: String = "",
+    val description: String = "",
+    val garnish: String = "",
+    val source: String = "",
+    val glassId: Int? = null,
+    val methodId: Int? = null,
+    val tags: List<String> = emptyList(),
+    val utensilIds: List<Int> = emptyList(),
+    val ingredients: List<EditorIngredientRow> = emptyList(),
+    val photos: List<EditorPhotoItem> = emptyList(),
+)
+
+private fun CocktailEditorUiState.toContentSnapshot(): EditorContentSnapshot = EditorContentSnapshot(
+    name = name,
+    instructions = instructions,
+    description = description,
+    garnish = garnish,
+    source = source,
+    glassId = glassId,
+    methodId = methodId,
+    tags = tags,
+    utensilIds = utensilIds,
+    ingredients = ingredients,
+    photos = photos,
 )
 
 class CocktailEditorViewModel(
@@ -101,7 +144,10 @@ class CocktailEditorViewModel(
     private val cocktailRepository: CocktailRepository,
 ) : ViewModel() {
     private var nextKey = 1L
-    private var hasLoadedExisting = false
+    private var hasUserEdited = false
+    private var activePhotoJobs = 0
+    private var loadJob: Job? = null
+    private var baselineSnapshot = EditorContentSnapshot()
 
     private val _uiState = MutableStateFlow(
         CocktailEditorUiState(
@@ -126,24 +172,38 @@ class CocktailEditorViewModel(
 
     private fun nextLocalKey(): Long = nextKey++
 
+    fun retryLoadExisting() {
+        val id = cocktailId ?: return
+        val current = _uiState.value
+        if (current.hasLoadedExisting || current.isLoadingExisting) return
+        _uiState.update { it.copy(isLoadingExisting = true, errorMessage = null) }
+        loadExistingCocktail(id)
+    }
+
     private fun loadExistingCocktail(id: Int) {
-        val observerJob = viewModelScope.launch {
-            val detail = cocktailRepository.observeCocktailDetail(id)
-                .filterNotNull()
-                .first()
-            applyExistingCocktail(detail)
-        }
-        viewModelScope.launch {
-            val refreshResult = cocktailRepository.refreshCocktail(id)
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
+            val observerJob = launch {
+                val detail = cocktailRepository.observeCocktailDetail(id)
+                    .filterNotNull()
+                    .first()
+                if (!hasUserEdited) {
+                    applyExistingCocktail(detail)
+                }
+            }
+            val refreshResult = try {
+                cocktailRepository.refreshCocktail(id)
+            } finally {
+                observerJob.cancel()
+            }
             refreshResult.fold(
-                onSuccess = { detail ->
-                    if (!hasLoadedExisting) {
-                        observerJob.cancel()
-                        applyExistingCocktail(detail)
+                onSuccess = { freshDetail ->
+                    if (!hasUserEdited) {
+                        applyExistingCocktail(freshDetail)
                     }
                 },
                 onFailure = { error ->
-                    if (!hasLoadedExisting) {
+                    if (!_uiState.value.hasLoadedExisting) {
                         _uiState.update {
                             it.copy(
                                 isLoadingExisting = false,
@@ -157,11 +217,12 @@ class CocktailEditorViewModel(
     }
 
     private fun applyExistingCocktail(detail: CocktailDetail) {
-        if (hasLoadedExisting) return
-        hasLoadedExisting = true
         _uiState.update { state ->
-            state.copy(
+            if (hasUserEdited) return@update state
+            val hydrated = state.copy(
                 isLoadingExisting = false,
+                hasLoadedExisting = true,
+                errorMessage = null,
                 name = detail.name,
                 instructions = detail.instructions,
                 description = detail.description.orEmpty(),
@@ -180,9 +241,19 @@ class CocktailEditorViewModel(
                             ingredientName = ing.name,
                             amountText = ing.amount?.let(::formatNumericInput).orEmpty(),
                             amountMaxText = ing.amountMax?.let(::formatNumericInput).orEmpty(),
-                            units = ing.units?.takeIf { it.isNotBlank() } ?: "ml",
+                            units = ing.units?.trim().orEmpty(),
                             optional = ing.optional,
+                            isSpecified = ing.isSpecified,
                             note = ing.note.orEmpty(),
+                            substitutes = ing.substitutes.map { sub ->
+                                IngredientSubstituteInput(
+                                    ingredientId = sub.id,
+                                    ingredientName = sub.name,
+                                    amount = sub.amount,
+                                    amountMax = sub.amountMax,
+                                    units = sub.units,
+                                )
+                            },
                         )
                     },
                 photos = detail.images
@@ -195,41 +266,74 @@ class CocktailEditorViewModel(
                         )
                     },
             )
+            baselineSnapshot = hydrated.toContentSnapshot()
+            hydrated.copy(hasUnsavedChanges = false)
+        }
+    }
+
+    private inline fun updateDraft(
+        clearError: Boolean = false,
+        transform: (CocktailEditorUiState) -> CocktailEditorUiState,
+    ) {
+        _uiState.update { current ->
+            if (current.isSaving) return@update current
+            val updated = transform(current)
+            if (updated == current) {
+                current
+            } else {
+                hasUserEdited = true
+                val next = if (clearError) updated.copy(errorMessage = null) else updated
+                next.copy(hasUnsavedChanges = next.toContentSnapshot() != baselineSnapshot)
+            }
         }
     }
 
     fun onNameChanged(value: String) {
-        _uiState.update { it.copy(name = value, errorMessage = null) }
+        updateDraft(clearError = true) { state ->
+            if (value == state.name) state else state.copy(name = value)
+        }
     }
 
     fun onInstructionsChanged(value: String) {
-        _uiState.update { it.copy(instructions = value, errorMessage = null) }
+        updateDraft(clearError = true) { state ->
+            if (value == state.instructions) state else state.copy(instructions = value)
+        }
     }
 
     fun onDescriptionChanged(value: String) {
-        _uiState.update { it.copy(description = value) }
+        updateDraft { state ->
+            if (value == state.description) state else state.copy(description = value)
+        }
     }
 
     fun onGarnishChanged(value: String) {
-        _uiState.update { it.copy(garnish = value) }
+        updateDraft { state ->
+            if (value == state.garnish) state else state.copy(garnish = value)
+        }
     }
 
     fun onSourceChanged(value: String) {
-        _uiState.update { it.copy(source = value) }
+        updateDraft { state ->
+            if (value == state.source) state else state.copy(source = value)
+        }
     }
 
     fun onGlassSelected(glassId: Int?) {
-        _uiState.update { it.copy(glassId = glassId) }
+        updateDraft { state ->
+            if (glassId == state.glassId) state else state.copy(glassId = glassId)
+        }
     }
 
     fun onMethodSelected(methodId: Int?) {
-        _uiState.update { it.copy(methodId = methodId) }
+        updateDraft { state ->
+            if (methodId == state.methodId) state else state.copy(methodId = methodId)
+        }
     }
 
     fun toggleTag(tagName: String) {
         val cleaned = tagName.trim()
         if (cleaned.isEmpty()) return
-        _uiState.update { state ->
+        updateDraft { state ->
             val exists = state.tags.any { it.equals(cleaned, ignoreCase = true) }
             val updated = if (exists) {
                 state.tags.filterNot { it.equals(cleaned, ignoreCase = true) }
@@ -243,7 +347,7 @@ class CocktailEditorViewModel(
     fun addCustomTag(tagName: String) {
         val cleaned = tagName.trim()
         if (cleaned.isEmpty()) return
-        _uiState.update { state ->
+        updateDraft { state ->
             if (state.tags.any { it.equals(cleaned, ignoreCase = true) }) {
                 state
             } else {
@@ -257,18 +361,15 @@ class CocktailEditorViewModel(
 
     fun addIngredientRow(): Long {
         val key = nextLocalKey()
-        _uiState.update { state ->
-            state.copy(
-                ingredients = state.ingredients + EditorIngredientRow(localKey = key),
-                errorMessage = null,
-            )
+        updateDraft(clearError = true) { state ->
+            state.copy(ingredients = state.ingredients + EditorIngredientRow(localKey = key))
         }
         return key
     }
 
     fun addIngredientRow(ingredient: IngredientSummary): Long {
         val key = nextLocalKey()
-        _uiState.update { state ->
+        updateDraft(clearError = true) { state ->
             state.copy(
                 ingredients = state.ingredients + EditorIngredientRow(
                     localKey = key,
@@ -277,14 +378,13 @@ class CocktailEditorViewModel(
                     amountText = "1",
                     units = "oz",
                 ),
-                errorMessage = null,
             )
         }
         return key
     }
 
     fun updateIngredientSelection(localKey: Long, ingredient: IngredientSummary) {
-        _uiState.update { state ->
+        updateDraft(clearError = true) { state ->
             state.copy(
                 ingredients = state.ingredients.map { row ->
                     if (row.localKey == localKey) {
@@ -297,7 +397,6 @@ class CocktailEditorViewModel(
                         row
                     }
                 },
-                errorMessage = null,
             )
         }
     }
@@ -310,7 +409,7 @@ class CocktailEditorViewModel(
         optional: Boolean? = null,
         note: String? = null,
     ) {
-        _uiState.update { state ->
+        updateDraft(clearError = true) { state ->
             state.copy(
                 ingredients = state.ingredients.map { row ->
                     if (row.localKey == localKey) {
@@ -325,15 +424,14 @@ class CocktailEditorViewModel(
                         row
                     }
                 },
-                errorMessage = null,
             )
         }
     }
 
     fun moveIngredientUp(localKey: Long) {
-        _uiState.update { state ->
+        updateDraft { state ->
             val index = state.ingredients.indexOfFirst { it.localKey == localKey }
-            if (index <= 0) return@update state
+            if (index <= 0) return@updateDraft state
             val mutable = state.ingredients.toMutableList()
             val item = mutable.removeAt(index)
             mutable.add(index - 1, item)
@@ -342,9 +440,9 @@ class CocktailEditorViewModel(
     }
 
     fun moveIngredientDown(localKey: Long) {
-        _uiState.update { state ->
+        updateDraft { state ->
             val index = state.ingredients.indexOfFirst { it.localKey == localKey }
-            if (index < 0 || index >= state.ingredients.lastIndex) return@update state
+            if (index < 0 || index >= state.ingredients.lastIndex) return@updateDraft state
             val mutable = state.ingredients.toMutableList()
             val item = mutable.removeAt(index)
             mutable.add(index + 1, item)
@@ -353,11 +451,54 @@ class CocktailEditorViewModel(
     }
 
     fun removeIngredientRow(localKey: Long) {
-        _uiState.update { state ->
-            state.copy(
-                ingredients = state.ingredients.filterNot { it.localKey == localKey },
-                errorMessage = null,
-            )
+        updateDraft(clearError = true) { state ->
+            val filtered = state.ingredients.filterNot { it.localKey == localKey }
+            if (filtered.size == state.ingredients.size) state else state.copy(ingredients = filtered)
+        }
+    }
+
+    fun addLocalPhoto(file: PlatformFile) {
+        if (_uiState.value.isSaving) return
+        activePhotoJobs += 1
+        _uiState.update { it.copy(isProcessingPhoto = true, errorMessage = null) }
+        viewModelScope.launch {
+            try {
+                val rawBytes = file.readBytes()
+                if (rawBytes.isEmpty()) {
+                    _uiState.update { it.copy(errorMessage = "Selected photo is empty.") }
+                    return@launch
+                }
+                if (rawBytes.size > MAX_RAW_PHOTO_BYTES) {
+                    _uiState.update { it.copy(errorMessage = "Selected photo is too large (max 25 MB).") }
+                    return@launch
+                }
+                val compressedBytes = FileKit.compressImage(
+                    bytes = rawBytes,
+                    imageFormat = ImageFormat.JPEG,
+                    quality = COMPRESSED_PHOTO_QUALITY,
+                    maxWidth = COMPRESSED_PHOTO_MAX_DIMENSION,
+                    maxHeight = COMPRESSED_PHOTO_MAX_DIMENSION,
+                )
+                if (compressedBytes.isEmpty()) {
+                    _uiState.update { it.copy(errorMessage = "Selected photo could not be processed.") }
+                    return@launch
+                }
+                addLocalPhoto(
+                    bytes = compressedBytes,
+                    fileName = normalizeJpegFileName(file.name),
+                    mimeType = "image/jpeg",
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(errorMessage = e.message ?: "Unable to process selected photo.")
+                }
+            } finally {
+                activePhotoJobs = (activePhotoJobs - 1).coerceAtLeast(0)
+                val stillProcessing = activePhotoJobs > 0
+                _uiState.update { it.copy(isProcessingPhoto = stillProcessing) }
+            }
         }
     }
 
@@ -366,20 +507,29 @@ class CocktailEditorViewModel(
         fileName: String,
         mimeType: String?,
     ) {
+        if (bytes.isEmpty()) {
+            _uiState.update { it.copy(errorMessage = "Selected photo is empty.") }
+            return
+        }
+        if (bytes.size > MAX_RAW_PHOTO_BYTES) {
+            _uiState.update { it.copy(errorMessage = "Selected photo is too large (max 25 MB).") }
+            return
+        }
         val item = EditorPhotoItem.PendingLocal(
             localKey = nextLocalKey(),
             bytes = bytes,
             fileName = fileName,
             mimeType = mimeType,
         )
-        _uiState.update { state ->
-            state.copy(photos = state.photos + item, errorMessage = null)
+        updateDraft(clearError = true) { state ->
+            state.copy(photos = state.photos + item)
         }
     }
 
     fun removePhoto(key: String) {
-        _uiState.update { state ->
-            state.copy(photos = state.photos.filterNot { it.stableKey == key })
+        updateDraft { state ->
+            val filtered = state.photos.filterNot { it.stableKey == key }
+            if (filtered.size == state.photos.size) state else state.copy(photos = filtered)
         }
     }
 
@@ -389,208 +539,265 @@ class CocktailEditorViewModel(
             _uiState.update { it.copy(errorMessage = "Enter a valid recipe URL.") }
             return
         }
+        while (true) {
+            val current = _uiState.value
+            if (current.isBusy || (current.isEditing && !current.hasLoadedExisting)) return
+            if (_uiState.compareAndSet(current, current.copy(isImporting = true, errorMessage = null))) {
+                break
+            }
+        }
+
         viewModelScope.launch {
-            _uiState.update { it.copy(isImporting = true, errorMessage = null) }
-            cocktailRepository.scrapeRecipeFromUrl(url).fold(
-                onSuccess = { scraped ->
-                    val catalog = resolveLatestCatalog()
-                    val matchedGlassId = scraped.glassName?.trim()?.takeIf { it.isNotEmpty() }?.let { gName ->
-                        catalog.glasses.firstOrNull { it.name.trim().equals(gName, ignoreCase = true) }?.id
-                    }
-                    val matchedMethodId = scraped.methodName?.trim()?.takeIf { it.isNotEmpty() }?.let { mName ->
-                        catalog.methods.firstOrNull { it.name.trim().equals(mName, ignoreCase = true) }?.id
-                    }
-                    val mappedIngredients = scraped.ingredients.map { item ->
-                        val cleanName = item.name.trim()
-                        val matched = catalog.ingredients.firstOrNull {
-                            it.name.trim().equals(cleanName, ignoreCase = true)
+            try {
+                cocktailRepository.scrapeRecipeFromUrl(url).fold(
+                    onSuccess = { scraped ->
+                        val catalog = resolveLatestCatalog()
+                        val matchedGlassId = scraped.glassName?.trim()?.takeIf { it.isNotEmpty() }?.let { gName ->
+                            catalog.glasses.firstOrNull { it.name.trim().equals(gName, ignoreCase = true) }?.id
                         }
-                        EditorIngredientRow(
-                            localKey = nextLocalKey(),
-                            ingredientId = matched?.id,
-                            ingredientName = matched?.name ?: cleanName,
-                            amountText = item.amount?.let(::formatNumericInput).orEmpty(),
-                            amountMaxText = item.amountMax?.let(::formatNumericInput).orEmpty(),
-                            units = item.units?.trim()?.takeIf { it.isNotEmpty() } ?: "ml",
-                            optional = false,
-                            note = item.note?.trim().orEmpty(),
-                            unmatchedScrapedHint = if (matched == null) {
-                                item.sourceLine?.trim()?.takeIf { it.isNotEmpty() } ?: cleanName
-                            } else {
-                                null
-                            },
-                        )
-                    }
-
-                    _uiState.update { current ->
-                        val mergedTags = mergeTags(current.tags, scraped.tags, catalog)
-                        val existingUrls = current.photos.mapNotNull { photo ->
-                            when (photo) {
-                                is EditorPhotoItem.Existing -> photo.url
-                                is EditorPhotoItem.PendingRemote -> photo.url
-                                is EditorPhotoItem.PendingLocal -> null
+                        val matchedMethodId = scraped.methodName?.trim()?.takeIf { it.isNotEmpty() }?.let { mName ->
+                            catalog.methods.firstOrNull { it.name.trim().equals(mName, ignoreCase = true) }?.id
+                        }
+                        val mappedIngredients = scraped.ingredients.map { item ->
+                            val cleanName = item.name.trim()
+                            val matched = catalog.ingredients.firstOrNull {
+                                it.name.trim().equals(cleanName, ignoreCase = true)
                             }
-                        }.toMutableSet()
-                        val importedPhotos = scraped.images.mapNotNull { image ->
-                            val uri = image.uri.trim()
-                            if (uri.isEmpty() || !existingUrls.add(uri)) {
-                                null
-                            } else {
-                                EditorPhotoItem.PendingRemote(
-                                    localKey = nextLocalKey(),
-                                    url = uri,
-                                    copyright = image.copyright,
-                                )
-                            }
+                            EditorIngredientRow(
+                                localKey = nextLocalKey(),
+                                ingredientId = matched?.id,
+                                ingredientName = matched?.name ?: cleanName,
+                                amountText = item.amount?.let(::formatNumericInput).orEmpty(),
+                                amountMaxText = item.amountMax?.let(::formatNumericInput).orEmpty(),
+                                units = item.units?.trim().orEmpty(),
+                                optional = false,
+                                note = item.note?.trim().orEmpty(),
+                                unmatchedScrapedHint = if (matched == null) {
+                                    item.sourceLine?.trim()?.takeIf { it.isNotEmpty() } ?: cleanName
+                                } else {
+                                    null
+                                },
+                            )
                         }
 
-                        current.copy(
-                            isImporting = false,
-                            name = scraped.name.trim().ifEmpty { current.name },
-                            instructions = scraped.instructions.trim().ifEmpty { current.instructions },
-                            description = scraped.description?.trim() ?: current.description,
-                            garnish = scraped.garnish?.trim() ?: current.garnish,
-                            source = scraped.source?.trim()?.takeIf { it.isNotEmpty() } ?: url,
-                            glassId = matchedGlassId ?: current.glassId,
-                            methodId = matchedMethodId ?: current.methodId,
-                            tags = mergedTags,
-                            ingredients = if (mappedIngredients.isNotEmpty()) mappedIngredients else current.ingredients,
-                            photos = current.photos + importedPhotos,
-                        )
-                    }
-                },
-                onFailure = { error ->
-                    _uiState.update {
-                        it.copy(
-                            isImporting = false,
-                            errorMessage = error.message ?: "Unable to import recipe from URL.",
-                        )
-                    }
-                },
-            )
+                        hasUserEdited = true
+                        _uiState.update { current ->
+                            val mergedTags = mergeTags(current.tags, scraped.tags, catalog)
+                            val existingUrls = current.photos.mapNotNull { photo ->
+                                when (photo) {
+                                    is EditorPhotoItem.Existing -> photo.url
+                                    is EditorPhotoItem.PendingRemote -> photo.url
+                                    is EditorPhotoItem.PendingLocal -> null
+                                }
+                            }.toMutableSet()
+                            val importedPhotos = scraped.images.mapNotNull { image ->
+                                val uri = image.uri.trim()
+                                if (uri.isEmpty() || !existingUrls.add(uri)) {
+                                    null
+                                } else {
+                                    EditorPhotoItem.PendingRemote(
+                                        localKey = nextLocalKey(),
+                                        url = uri,
+                                        copyright = image.copyright,
+                                    )
+                                }
+                            }
+
+                            val next = current.copy(
+                                isImporting = false,
+                                name = scraped.name.trim().ifEmpty { current.name },
+                                instructions = scraped.instructions.trim().ifEmpty { current.instructions },
+                                description = scraped.description?.trim()?.takeIf { it.isNotEmpty() } ?: current.description,
+                                garnish = scraped.garnish?.trim()?.takeIf { it.isNotEmpty() } ?: current.garnish,
+                                source = scraped.source?.trim()?.takeIf { it.isNotEmpty() } ?: url,
+                                glassId = matchedGlassId ?: current.glassId,
+                                methodId = matchedMethodId ?: current.methodId,
+                                tags = mergedTags,
+                                ingredients = if (mappedIngredients.isNotEmpty()) mappedIngredients else current.ingredients,
+                                photos = current.photos + importedPhotos,
+                            )
+                            next.copy(hasUnsavedChanges = next.toContentSnapshot() != baselineSnapshot)
+                        }
+                    },
+                    onFailure = { error ->
+                        _uiState.update {
+                            it.copy(
+                                isImporting = false,
+                                errorMessage = error.message ?: "Unable to import recipe from URL.",
+                            )
+                        }
+                    },
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isImporting = false,
+                        errorMessage = e.message ?: "Unable to import recipe from URL.",
+                    )
+                }
+            }
         }
     }
 
     fun save() {
-        val snapshot = _uiState.value
-        if (snapshot.isSaving) return
-
-        val validationError = validateForSave(snapshot)
-        if (validationError != null) {
-            _uiState.update { it.copy(errorMessage = validationError) }
-            return
+        var validatedSnapshot: CocktailEditorUiState? = null
+        while (true) {
+            val current = _uiState.value
+            if (!current.canSubmitSave) return
+            val validationError = validateForSave(current)
+            if (validationError != null) {
+                if (_uiState.compareAndSet(current, current.copy(errorMessage = validationError))) {
+                    return
+                }
+                continue
+            }
+            if (_uiState.compareAndSet(current, current.copy(isSaving = true, errorMessage = null))) {
+                validatedSnapshot = current
+                break
+            }
         }
+        val snapshot = validatedSnapshot
 
         viewModelScope.launch {
-            _uiState.update { it.copy(isSaving = true, errorMessage = null) }
+            try {
+                val collectedImageIds = mutableListOf<Int>()
+                val uploadedByKey = mutableMapOf<String, EditorPhotoItem.Existing>()
 
-            val collectedImageIds = mutableListOf<Int>()
-            val updatedPhotos = snapshot.photos.toMutableList()
+                for (index in snapshot.photos.indices) {
+                    val sortOrder = index + 1
+                    when (val photo = snapshot.photos[index]) {
+                        is EditorPhotoItem.Existing -> collectedImageIds += photo.id
 
-            for (index in updatedPhotos.indices) {
-                val sortOrder = index + 1
-                when (val photo = updatedPhotos[index]) {
-                    is EditorPhotoItem.Existing -> collectedImageIds += photo.id
-
-                    is EditorPhotoItem.PendingLocal -> {
-                        val uploaded = cocktailRepository.uploadImage(
-                            bytes = photo.bytes,
-                            fileName = photo.fileName,
-                            mimeType = photo.mimeType,
-                            sort = sortOrder,
-                        ).getOrElse { error ->
-                            _uiState.update {
-                                it.copy(
-                                    isSaving = false,
-                                    photos = updatedPhotos,
-                                    errorMessage = error.message ?: "Failed to upload photo ${photo.fileName}.",
-                                )
+                        is EditorPhotoItem.PendingLocal -> {
+                            val uploaded = cocktailRepository.uploadImage(
+                                bytes = photo.bytes,
+                                fileName = photo.fileName,
+                                mimeType = photo.mimeType,
+                                sort = sortOrder,
+                            ).getOrElse { error ->
+                                _uiState.update { current ->
+                                    current.copy(
+                                        isSaving = false,
+                                        photos = reconcileUploadedPhotos(current.photos, uploadedByKey),
+                                        errorMessage = error.message ?: "Failed to upload photo ${photo.fileName}.",
+                                    )
+                                }
+                                return@launch
                             }
-                            return@launch
+                            uploadedByKey[photo.stableKey] = EditorPhotoItem.Existing(
+                                id = uploaded.id,
+                                url = uploaded.url,
+                                thumbUrl = uploaded.thumbUrl,
+                            )
+                            collectedImageIds += uploaded.id
                         }
-                        updatedPhotos[index] = EditorPhotoItem.Existing(
-                            id = uploaded.id,
-                            url = uploaded.url,
-                            thumbUrl = uploaded.thumbUrl,
-                        )
-                        collectedImageIds += uploaded.id
-                    }
 
-                    is EditorPhotoItem.PendingRemote -> {
-                        val uploaded = cocktailRepository.uploadImageFromUrl(
-                            imageUrl = photo.url,
-                            copyright = photo.copyright,
-                            sort = sortOrder,
-                        ).getOrElse { error ->
-                            _uiState.update {
-                                it.copy(
-                                    isSaving = false,
-                                    photos = updatedPhotos,
-                                    errorMessage = error.message ?: "Failed to upload imported image.",
-                                )
+                        is EditorPhotoItem.PendingRemote -> {
+                            val uploaded = cocktailRepository.uploadImageFromUrl(
+                                imageUrl = photo.url,
+                                copyright = photo.copyright,
+                                sort = sortOrder,
+                            ).getOrElse { error ->
+                                _uiState.update { current ->
+                                    current.copy(
+                                        isSaving = false,
+                                        photos = reconcileUploadedPhotos(current.photos, uploadedByKey),
+                                        errorMessage = error.message ?: "Failed to upload imported image.",
+                                    )
+                                }
+                                return@launch
                             }
-                            return@launch
+                            uploadedByKey[photo.stableKey] = EditorPhotoItem.Existing(
+                                id = uploaded.id,
+                                url = uploaded.url,
+                                thumbUrl = uploaded.thumbUrl,
+                            )
+                            collectedImageIds += uploaded.id
                         }
-                        updatedPhotos[index] = EditorPhotoItem.Existing(
-                            id = uploaded.id,
-                            url = uploaded.url,
-                            thumbUrl = uploaded.thumbUrl,
-                        )
-                        collectedImageIds += uploaded.id
                     }
                 }
-            }
 
-            _uiState.update { it.copy(photos = updatedPhotos) }
+                _uiState.update { current ->
+                    current.copy(photos = reconcileUploadedPhotos(current.photos, uploadedByKey))
+                }
 
-            val request = CocktailUpsertRequest(
-                name = snapshot.name.trim(),
-                instructions = snapshot.instructions.trim(),
-                description = snapshot.description.trim().takeIf { it.isNotEmpty() },
-                garnish = snapshot.garnish.trim().takeIf { it.isNotEmpty() },
-                source = snapshot.source.trim().takeIf { it.isNotEmpty() },
-                glassId = snapshot.glassId,
-                methodId = snapshot.methodId,
-                tags = snapshot.tags.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
-                utensilIds = snapshot.utensilIds,
-                imageIds = collectedImageIds,
-                ingredients = snapshot.ingredients.mapIndexed { index, row ->
-                    CocktailIngredientInput(
-                        ingredientId = requireNotNull(row.ingredientId),
-                        ingredientName = row.ingredientName,
-                        amount = row.amountText.trim().toDouble(),
-                        amountMax = row.amountMaxText.trim().takeIf { it.isNotEmpty() }?.toDouble(),
-                        units = row.units.trim(),
-                        sort = index + 1,
-                        optional = row.optional,
-                        note = row.note.trim().takeIf { it.isNotEmpty() },
+                val request = CocktailUpsertRequest(
+                    name = snapshot.name.trim(),
+                    instructions = snapshot.instructions.trim(),
+                    description = snapshot.description.trim().takeIf { it.isNotEmpty() },
+                    garnish = snapshot.garnish.trim().takeIf { it.isNotEmpty() },
+                    source = snapshot.source.trim().takeIf { it.isNotEmpty() },
+                    glassId = snapshot.glassId,
+                    methodId = snapshot.methodId,
+                    tags = snapshot.tags.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
+                    utensilIds = snapshot.utensilIds,
+                    imageIds = collectedImageIds,
+                    ingredients = snapshot.ingredients.mapIndexed { index, row ->
+                        val amount = row.amountText.trim().takeIf { it.isNotEmpty() }?.toDouble() ?: 0.0
+                        CocktailIngredientInput(
+                            ingredientId = requireNotNull(row.ingredientId),
+                            ingredientName = row.ingredientName,
+                            amount = amount,
+                            amountMax = row.amountMaxText.trim().takeIf { it.isNotEmpty() }?.toDouble(),
+                            units = row.units.trim(),
+                            sort = index + 1,
+                            optional = row.optional,
+                            isSpecified = row.isSpecified,
+                            note = row.note.trim().takeIf { it.isNotEmpty() },
+                            substitutes = row.substitutes,
+                        )
+                    },
+                )
+
+                cocktailRepository.saveCocktail(cocktailId, request).fold(
+                    onSuccess = { saved ->
+                        _uiState.update { current ->
+                            baselineSnapshot = current.toContentSnapshot()
+                            current.copy(
+                                isSaving = false,
+                                hasUnsavedChanges = false,
+                                savedCocktailId = saved.id,
+                            )
+                        }
+                    },
+                    onFailure = { error ->
+                        _uiState.update {
+                            it.copy(
+                                isSaving = false,
+                                errorMessage = error.message ?: "Unable to save recipe.",
+                            )
+                        }
+                    },
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isSaving = false,
+                        errorMessage = e.message ?: "Unable to save recipe.",
                     )
-                },
-            )
-
-            cocktailRepository.saveCocktail(cocktailId, request).fold(
-                onSuccess = { saved ->
-                    _uiState.update {
-                        it.copy(
-                            isSaving = false,
-                            savedCocktailId = saved.id,
-                        )
-                    }
-                },
-                onFailure = { error ->
-                    _uiState.update {
-                        it.copy(
-                            isSaving = false,
-                            errorMessage = error.message ?: "Unable to save recipe.",
-                        )
-                    }
-                },
-            )
+                }
+            }
         }
+    }
+
+    fun consumeSavedEvent() {
+        _uiState.update { it.copy(savedCocktailId = null) }
     }
 
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
+    }
+
+    private fun reconcileUploadedPhotos(
+        photos: List<EditorPhotoItem>,
+        uploadedByKey: Map<String, EditorPhotoItem.Existing>,
+    ): List<EditorPhotoItem> {
+        if (uploadedByKey.isEmpty()) return photos
+        return photos.map { photo -> uploadedByKey[photo.stableKey] ?: photo }
     }
 
     private suspend fun resolveLatestCatalog(): BarCatalog {
@@ -602,6 +809,9 @@ class CocktailEditorViewModel(
     }
 
     private fun validateForSave(state: CocktailEditorUiState): String? {
+        if (state.isEditing && !state.hasLoadedExisting) {
+            return "Load the existing recipe before saving."
+        }
         if (state.name.isBlank()) {
             return "Recipe name is required."
         }
@@ -613,18 +823,26 @@ class CocktailEditorViewModel(
                 val label = row.unmatchedScrapedHint ?: row.ingredientName.ifBlank { "ingredient row" }
                 return "Match or remove \"$label\" before saving."
             }
-            val amount = row.amountText.trim().toDoubleOrNull()
-            if (amount == null || amount <= 0.0) {
-                return "Enter an amount greater than 0 for ${row.ingredientName}."
+            val trimmedAmount = row.amountText.trim()
+            val trimmedUnits = row.units.trim()
+            val amount = if (trimmedAmount.isEmpty()) {
+                if (trimmedUnits.isNotEmpty()) {
+                    0.0
+                } else {
+                    return "Enter an amount or unit for ${row.ingredientName}."
+                }
+            } else {
+                val parsed = trimmedAmount.toDoubleOrNull()
+                if (parsed == null || !parsed.isFinite() || parsed < 0.0) {
+                    return "Enter a valid amount for ${row.ingredientName}."
+                }
+                parsed
             }
             if (row.amountMaxText.isNotBlank()) {
                 val maxAmount = row.amountMaxText.trim().toDoubleOrNull()
-                if (maxAmount == null || maxAmount < amount) {
+                if (maxAmount == null || !maxAmount.isFinite() || maxAmount < 0.0 || maxAmount < amount) {
                     return "Enter a valid max amount for ${row.ingredientName}."
                 }
-            }
-            if (row.units.isBlank()) {
-                return "Select a unit for ${row.ingredientName}."
             }
         }
         return null
@@ -647,5 +865,10 @@ class CocktailEditorViewModel(
                 }
             }
         }
+    }
+
+    private fun normalizeJpegFileName(originalName: String): String {
+        val base = originalName.trim().substringBeforeLast('.').ifBlank { "photo" }
+        return "$base.jpg"
     }
 }

@@ -6,6 +6,7 @@ import com.ryanvidal.barfriend.core.data.AppPreferences
 import com.ryanvidal.barfriend.core.data.CocktailRepository
 import com.ryanvidal.barfriend.core.model.CocktailDetail
 import com.ryanvidal.barfriend.core.model.VolumeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -17,6 +18,8 @@ import kotlinx.coroutines.launch
 data class CocktailDetailUiState(
     val cocktail: CocktailDetail? = null,
     val isLoading: Boolean = true,
+    val isRefreshing: Boolean = false,
+    val isTogglingFavorite: Boolean = false,
     val selectedUnit: VolumeUnit = VolumeUnit.OZ,
     val scaleFactor: Double = 1.0,
     val isMakeMode: Boolean = false,
@@ -31,6 +34,8 @@ private data class DetailInteractionState(
     val scaleFactor: Double = 1.0,
     val isMakeMode: Boolean = false,
     val checkedSteps: Set<Int> = emptySet(),
+    val isRefreshing: Boolean = false,
+    val isTogglingFavorite: Boolean = false,
     val isDeleting: Boolean = false,
     val deleted: Boolean = false,
     val initialRefreshDone: Boolean = false,
@@ -52,13 +57,21 @@ class CocktailDetailViewModel(
     ) { cocktail, settings, local ->
         val effectiveError = local.actionError
             ?: if (cocktail == null) local.refreshError else null
+        val boundedCheckedSteps = if (cocktail != null) {
+            val validIndices = parseInstructionSteps(cocktail.instructions).indices
+            local.checkedSteps.filterTo(HashSet()) { it in validIndices }
+        } else {
+            emptySet()
+        }
         CocktailDetailUiState(
             cocktail = cocktail,
             isLoading = cocktail == null && !local.initialRefreshDone,
+            isRefreshing = local.isRefreshing,
+            isTogglingFavorite = local.isTogglingFavorite,
             selectedUnit = local.unitOverride ?: settings.preferredUnit,
             scaleFactor = local.scaleFactor,
             isMakeMode = local.isMakeMode,
-            checkedSteps = local.checkedSteps,
+            checkedSteps = boundedCheckedSteps,
             isDeleting = local.isDeleting,
             deleted = local.deleted,
             errorMessage = effectiveError,
@@ -74,13 +87,33 @@ class CocktailDetailViewModel(
     }
 
     fun refresh() {
+        while (true) {
+            val current = interaction.value
+            if (current.isRefreshing) return
+            if (interaction.compareAndSet(current, current.copy(isRefreshing = true, refreshError = null))) {
+                break
+            }
+        }
         viewModelScope.launch {
-            val result = cocktailRepository.refreshCocktail(cocktailId)
-            interaction.update { current ->
-                current.copy(
-                    initialRefreshDone = true,
-                    refreshError = result.exceptionOrNull()?.message,
-                )
+            try {
+                val result = cocktailRepository.refreshCocktail(cocktailId)
+                interaction.update { current ->
+                    current.copy(
+                        isRefreshing = false,
+                        initialRefreshDone = true,
+                        refreshError = result.exceptionOrNull()?.message,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                interaction.update { current ->
+                    current.copy(
+                        isRefreshing = false,
+                        initialRefreshDone = true,
+                        refreshError = e.message,
+                    )
+                }
             }
         }
     }
@@ -90,7 +123,7 @@ class CocktailDetailViewModel(
     }
 
     fun setScaleFactor(scale: Double) {
-        if (scale <= 0.0) return
+        if (!scale.isFinite() || scale <= 0.0) return
         interaction.update { it.copy(scaleFactor = scale) }
     }
 
@@ -110,32 +143,63 @@ class CocktailDetailViewModel(
     }
 
     fun toggleFavorite() {
+        while (true) {
+            val current = interaction.value
+            if (current.isTogglingFavorite || current.isDeleting || current.deleted) return
+            if (interaction.compareAndSet(current, current.copy(isTogglingFavorite = true))) {
+                break
+            }
+        }
         viewModelScope.launch {
-            cocktailRepository.toggleFavorite(cocktailId).onFailure { error ->
-                interaction.update {
-                    it.copy(actionError = error.message ?: "Unable to update favorite status.")
+            try {
+                cocktailRepository.toggleFavorite(cocktailId).onFailure { error ->
+                    interaction.update {
+                        it.copy(actionError = error.message ?: "Unable to update favorite status.")
+                    }
                 }
+            } finally {
+                interaction.update { it.copy(isTogglingFavorite = false) }
             }
         }
     }
 
     fun deleteCocktail() {
-        if (interaction.value.isDeleting) return
-        viewModelScope.launch {
-            interaction.update { it.copy(isDeleting = true, actionError = null) }
-            cocktailRepository.deleteCocktail(cocktailId)
-                .onSuccess {
-                    interaction.update { it.copy(isDeleting = false, deleted = true) }
-                }
-                .onFailure { error ->
-                    interaction.update {
-                        it.copy(
-                            isDeleting = false,
-                            actionError = error.message ?: "Unable to delete recipe.",
-                        )
-                    }
-                }
+        while (true) {
+            val current = interaction.value
+            if (current.isDeleting || current.deleted) return
+            if (interaction.compareAndSet(current, current.copy(isDeleting = true, actionError = null))) {
+                break
+            }
         }
+        viewModelScope.launch {
+            try {
+                cocktailRepository.deleteCocktail(cocktailId)
+                    .onSuccess {
+                        interaction.update { it.copy(isDeleting = false, deleted = true) }
+                    }
+                    .onFailure { error ->
+                        interaction.update {
+                            it.copy(
+                                isDeleting = false,
+                                actionError = error.message ?: "Unable to delete recipe.",
+                            )
+                        }
+                    }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                interaction.update {
+                    it.copy(
+                        isDeleting = false,
+                        actionError = e.message ?: "Unable to delete recipe.",
+                    )
+                }
+            }
+        }
+    }
+
+    fun consumeDeletedEvent() {
+        interaction.update { it.copy(deleted = false) }
     }
 
     fun clearError() {

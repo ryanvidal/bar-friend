@@ -35,10 +35,15 @@ kotlin {
             implementation(libs.jetbrains.lifecycle.viewmodel.compose)
             implementation(libs.jetbrains.lifecycle.runtime.compose)
             implementation(libs.kotlinx.serialization.core)
+            implementation(libs.compose.ui.tooling.preview)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
             implementation(libs.kotlinx.coroutines.test)
         }
     }
+}
+
+dependencies {
+    "androidRuntimeClasspath"(libs.compose.ui.tooling)
 }

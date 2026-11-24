@@ -25,6 +25,7 @@ data class CocktailsListUiState(
     val catalog: BarCatalog = BarCatalog(),
     val syncStatus: SyncStatus = SyncStatus(),
     val hasLoaded: Boolean = false,
+    val favoriteInFlightIds: Set<Int> = emptySet(),
     val actionErrorMessage: String? = null,
 )
 
@@ -34,25 +35,38 @@ class CocktailsListViewModel(
     private val cocktailRepository: CocktailRepository,
 ) : ViewModel() {
     private val filter = MutableStateFlow(CocktailFilter())
+    private val favoriteInFlightIds = MutableStateFlow<Set<Int>>(emptySet())
     private val actionErrorMessage = MutableStateFlow<String?>(null)
 
     private val cocktailsFlow = filter.flatMapLatest { activeFilter ->
         cocktailRepository.observeCocktails(activeFilter)
     }
 
+    init {
+        viewModelScope.launch {
+            cocktailRepository.observeCatalog().collect(::pruneStaleCatalogFilters)
+        }
+    }
+
     val uiState: StateFlow<CocktailsListUiState> = combine(
-        filter,
-        cocktailsFlow,
-        cocktailRepository.observeCatalog(),
+        combine(
+            filter,
+            cocktailsFlow,
+            cocktailRepository.observeCatalog(),
+        ) { currentFilter, cocktails, catalog ->
+            Triple(currentFilter, cocktails, catalog)
+        },
         cocktailRepository.syncStatus,
+        favoriteInFlightIds,
         actionErrorMessage,
-    ) { currentFilter, cocktails, catalog, syncStatus, error ->
+    ) { (currentFilter, cocktails, catalog), syncStatus, inFlightFavorites, error ->
         CocktailsListUiState(
             filter = currentFilter,
             cocktails = cocktails,
             catalog = catalog,
             syncStatus = syncStatus,
             hasLoaded = true,
+            favoriteInFlightIds = inFlightFavorites,
             actionErrorMessage = error,
         )
     }.stateIn(
@@ -95,9 +109,20 @@ class CocktailsListViewModel(
     }
 
     fun toggleFavorite(cocktailId: Int) {
+        while (true) {
+            val current = favoriteInFlightIds.value
+            if (cocktailId in current) return
+            if (favoriteInFlightIds.compareAndSet(current, current + cocktailId)) {
+                break
+            }
+        }
         viewModelScope.launch {
-            cocktailRepository.toggleFavorite(cocktailId).onFailure { error ->
-                actionErrorMessage.value = error.message ?: "Unable to update favorite status."
+            try {
+                cocktailRepository.toggleFavorite(cocktailId).onFailure { error ->
+                    actionErrorMessage.value = error.message ?: "Unable to update favorite status."
+                }
+            } finally {
+                favoriteInFlightIds.update { it - cocktailId }
             }
         }
     }
@@ -110,5 +135,28 @@ class CocktailsListViewModel(
 
     fun dismissActionError() {
         actionErrorMessage.value = null
+    }
+
+    private fun pruneStaleCatalogFilters(catalog: BarCatalog) {
+        val validTagIds = catalog.tags.mapTo(HashSet(catalog.tags.size)) { it.id }
+        val validGlassIds = catalog.glasses.mapTo(HashSet(catalog.glasses.size)) { it.id }
+        val validMethodIds = catalog.methods.mapTo(HashSet(catalog.methods.size)) { it.id }
+        filter.update { current ->
+            val prunedTags = current.tagIds.filterTo(mutableSetOf()) { it in validTagIds }
+            val prunedGlass = current.glassId?.takeIf { it in validGlassIds }
+            val prunedMethod = current.methodId?.takeIf { it in validMethodIds }
+            if (prunedTags == current.tagIds &&
+                prunedGlass == current.glassId &&
+                prunedMethod == current.methodId
+            ) {
+                current
+            } else {
+                current.copy(
+                    tagIds = prunedTags,
+                    glassId = prunedGlass,
+                    methodId = prunedMethod,
+                )
+            }
+        }
     }
 }

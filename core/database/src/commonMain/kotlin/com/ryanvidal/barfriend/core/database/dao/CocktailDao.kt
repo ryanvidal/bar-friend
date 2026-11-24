@@ -42,6 +42,10 @@ interface CocktailDao {
     @Query("SELECT * FROM cocktails WHERE id = :cocktailId")
     fun observeCocktailWithIngredients(cocktailId: Int): Flow<CocktailWithIngredients?>
 
+    @Transaction
+    @Query("SELECT * FROM cocktails WHERE barId = :barId AND id = :cocktailId")
+    fun observeCocktailWithIngredients(barId: Int, cocktailId: Int): Flow<CocktailWithIngredients?>
+
     @Query("SELECT * FROM cocktail_ingredients WHERE cocktailId = :cocktailId ORDER BY sort ASC")
     fun observeCocktailIngredients(cocktailId: Int): Flow<List<CocktailIngredientEntity>>
 
@@ -72,6 +76,9 @@ interface CocktailDao {
     @Query("UPDATE cocktails SET isFavorite = :isFavorite WHERE id = :cocktailId")
     suspend fun updateFavorite(cocktailId: Int, isFavorite: Boolean)
 
+    @Query("UPDATE cocktails SET isFavorite = :isFavorite WHERE barId = :barId AND id = :cocktailId")
+    suspend fun updateFavorite(barId: Int, cocktailId: Int, isFavorite: Boolean)
+
     @Transaction
     suspend fun replaceAllCocktailsForBar(
         barId: Int,
@@ -89,6 +96,9 @@ interface CocktailDao {
 
     @Query("DELETE FROM cocktails WHERE id = :cocktailId")
     suspend fun deleteCocktailById(cocktailId: Int)
+
+    @Query("DELETE FROM cocktails WHERE barId = :barId AND id = :cocktailId")
+    suspend fun deleteCocktailById(barId: Int, cocktailId: Int)
 
     @Query("DELETE FROM cocktails WHERE barId = :barId")
     suspend fun deleteCocktailsForBar(barId: Int)

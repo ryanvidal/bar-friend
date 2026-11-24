@@ -16,6 +16,7 @@ import com.ryanvidal.barfriend.core.model.CocktailSummary
 import com.ryanvidal.barfriend.core.model.CocktailTag
 import com.ryanvidal.barfriend.core.model.CocktailUpsertRequest
 import com.ryanvidal.barfriend.core.model.Glass
+import com.ryanvidal.barfriend.core.model.IngredientSubstitute
 import com.ryanvidal.barfriend.core.model.IngredientSummary
 import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.UploadedImage
@@ -24,6 +25,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.update
 
 internal class InMemoryPreferencesDataStore(
@@ -70,10 +73,14 @@ internal class FakeCocktailRepository(
     private val catalogFlow = MutableStateFlow(initialCatalog)
 
     var refreshResultOverride: ((Int) -> Result<CocktailDetail>)? = null
+    var refreshSuspendOverride: (suspend (Int) -> Result<CocktailDetail>)? = null
     var toggleFavoriteFailure: Throwable? = null
+    var toggleFavoriteSuspendHook: (suspend (Int) -> Unit)? = null
     var deleteFailure: Throwable? = null
+    var deleteSuspendHook: (suspend (Int) -> Unit)? = null
     var scrapeResult: Result<ScrapedCocktail> = Result.failure(IllegalStateException("No scrape configured"))
     var uploadLocalFailure: Throwable? = null
+    var uploadLocalSuspendHook: (suspend () -> Unit)? = null
     var uploadRemoteFailure: Throwable? = null
     var saveFailure: Throwable? = null
 
@@ -85,9 +92,29 @@ internal class FakeCocktailRepository(
     val remoteUploads = mutableListOf<RemoteUploadCall>()
     val saveCalls = mutableListOf<SaveCocktailCall>()
     var syncAllCalls = 0
+    var activeDetailObserverCount = 0
+        private set
 
     private var nextImageId = 500
     private var nextCocktailId = 900
+
+    fun setDetail(cocktailId: Int, detail: CocktailDetail?) {
+        detailsFlow.update { current ->
+            if (detail == null) current - cocktailId else current + (cocktailId to detail)
+        }
+    }
+
+    fun setCatalog(catalog: BarCatalog) {
+        catalogFlow.value = catalog
+    }
+
+    fun setCocktails(items: List<CocktailSummary>) {
+        cocktailsFlow.value = items
+    }
+
+    fun setSyncStatus(status: SyncStatus) {
+        _syncStatus.value = status
+    }
 
     override fun observeCocktails(filter: CocktailFilter): Flow<List<CocktailSummary>> =
         cocktailsFlow.map { items ->
@@ -123,7 +150,10 @@ internal class FakeCocktailRepository(
         }
 
     override fun observeCocktailDetail(cocktailId: Int): Flow<CocktailDetail?> =
-        detailsFlow.map { it[cocktailId] }
+        detailsFlow
+            .map { it[cocktailId] }
+            .onStart { activeDetailObserverCount += 1 }
+            .onCompletion { activeDetailObserverCount -= 1 }
 
     override fun observeCatalog(): Flow<BarCatalog> = catalogFlow
 
@@ -134,6 +164,7 @@ internal class FakeCocktailRepository(
 
     override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> {
         refreshedCocktailIds += cocktailId
+        refreshSuspendOverride?.let { return it(cocktailId) }
         refreshResultOverride?.let { return it(cocktailId) }
         val detail = detailsFlow.value[cocktailId]
         return if (detail != null) {
@@ -145,6 +176,7 @@ internal class FakeCocktailRepository(
 
     override suspend fun toggleFavorite(cocktailId: Int): Result<Boolean> {
         toggledFavoriteIds += cocktailId
+        toggleFavoriteSuspendHook?.invoke(cocktailId)
         toggleFavoriteFailure?.let { return Result.failure(it) }
         val current = detailsFlow.value[cocktailId]?.isFavorite
             ?: cocktailsFlow.value.firstOrNull { it.id == cocktailId }?.isFavorite
@@ -207,7 +239,18 @@ internal class FakeCocktailRepository(
                     optional = input.optional,
                     note = input.note,
                     inBarShelf = true,
-                    substitutes = emptyList(),
+                    substitutes = input.substitutes.map { sub ->
+                        IngredientSubstitute(
+                            id = sub.ingredientId,
+                            slug = sub.ingredientName.lowercase().replace(' ', '-'),
+                            name = sub.ingredientName,
+                            inBarShelf = true,
+                            amount = sub.amount,
+                            amountMax = sub.amountMax,
+                            units = sub.units,
+                        )
+                    },
+                    isSpecified = input.isSpecified,
                 )
             },
             isFavorite = detailsFlow.value[resolvedId]?.isFavorite ?: false,
@@ -220,6 +263,7 @@ internal class FakeCocktailRepository(
 
     override suspend fun deleteCocktail(cocktailId: Int): Result<Unit> {
         deletedCocktailIds += cocktailId
+        deleteSuspendHook?.invoke(cocktailId)
         deleteFailure?.let { return Result.failure(it) }
         detailsFlow.update { it - cocktailId }
         cocktailsFlow.update { list -> list.filterNot { it.id == cocktailId } }
@@ -233,6 +277,7 @@ internal class FakeCocktailRepository(
         sort: Int,
     ): Result<UploadedImage> {
         localUploads += LocalUploadCall(bytes, fileName, mimeType, sort)
+        uploadLocalSuspendHook?.invoke()
         uploadLocalFailure?.let { return Result.failure(it) }
         val id = nextImageId++
         return Result.success(
@@ -311,9 +356,48 @@ internal fun sampleCocktailDetail(id: Int = 1): CocktailDetail = CocktailDetail(
     tags = listOf(CocktailTag(30, "Classic"), CocktailTag(31, "Bitter")),
     utensils = emptyList(),
     ingredients = listOf(
-        CocktailIngredient(1, 1, "gin", "London Dry Gin", 1, 30.0, null, "ml", false, null, inBarShelf = true, substitutes = emptyList()),
-        CocktailIngredient(2, 2, "campari", "Campari", 2, 30.0, null, "ml", false, null, inBarShelf = true, substitutes = emptyList()),
-        CocktailIngredient(3, 3, "sweet-vermouth", "Sweet Vermouth", 3, 30.0, null, "ml", false, null, inBarShelf = false, substitutes = emptyList()),
+        CocktailIngredient(
+            id = 1,
+            ingredientId = 1,
+            ingredientSlug = "gin",
+            name = "London Dry Gin",
+            sort = 1,
+            amount = 30.0,
+            amountMax = null,
+            units = "ml",
+            optional = false,
+            note = null,
+            inBarShelf = true,
+            substitutes = emptyList(),
+        ),
+        CocktailIngredient(
+            id = 2,
+            ingredientId = 2,
+            ingredientSlug = "campari",
+            name = "Campari",
+            sort = 2,
+            amount = 30.0,
+            amountMax = null,
+            units = "ml",
+            optional = false,
+            note = null,
+            inBarShelf = true,
+            substitutes = emptyList(),
+        ),
+        CocktailIngredient(
+            id = 3,
+            ingredientId = 3,
+            ingredientSlug = "sweet-vermouth",
+            name = "Sweet Vermouth",
+            sort = 3,
+            amount = 30.0,
+            amountMax = null,
+            units = "ml",
+            optional = false,
+            note = null,
+            inBarShelf = false,
+            substitutes = emptyList(),
+        ),
     ),
     isFavorite = false,
     inBarShelf = false,

@@ -15,9 +15,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material.icons.rounded.Logout
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -46,11 +46,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation3.runtime.NavKey
+import com.ryanvidal.barfriend.core.data.SyncStatus
+import com.ryanvidal.barfriend.core.designsystem.BarFriendTheme
+import com.ryanvidal.barfriend.core.designsystem.LocalBarFriendStatusColors
 import com.ryanvidal.barfriend.core.designsystem.SectionHeader
-import com.ryanvidal.barfriend.core.designsystem.StatusReadyGreen
 import com.ryanvidal.barfriend.core.model.AppThemeMode
 import com.ryanvidal.barfriend.core.model.VolumeUnit
 import kotlinx.serialization.Serializable
@@ -202,7 +205,7 @@ fun SettingsContent(
                     Text("Signing Out...")
                 } else {
                     Icon(
-                        imageVector = Icons.Rounded.Logout,
+                        imageVector = Icons.AutoMirrored.Rounded.Logout,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp),
                     )
@@ -214,35 +217,46 @@ fun SettingsContent(
     }
 
     if (showSignOutDialog) {
-        AlertDialog(
-            onDismissRequest = { showSignOutDialog = false },
-            title = { Text("Sign out of Bar Friend?") },
-            text = {
-                Text(
-                    "Local cached recipes on this device will stay available for sign-in reconnection, or you can reconnect anytime.",
-                )
+        SignOutConfirmationDialog(
+            onConfirm = {
+                showSignOutDialog = false
+                onSignOutClick()
             },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showSignOutDialog = false
-                        onSignOutClick()
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError,
-                    ),
-                ) {
-                    Text("Sign Out")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSignOutDialog = false }) {
-                    Text("Cancel")
-                }
-            },
+            onDismiss = { showSignOutDialog = false },
         )
     }
+}
+
+@Composable
+fun SignOutConfirmationDialog(
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sign out of Bar Friend?") },
+        text = {
+            Text(
+                "Signing out will clear your cached cocktails, bar data, and images from this device.",
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                ),
+            ) {
+                Text("Sign Out")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
 }
 
 @Composable
@@ -285,18 +299,19 @@ private fun ActiveBarCard(
 
 @Composable
 private fun ConnectionStatusBadge(isConnected: Boolean) {
+    val readyColor = LocalBarFriendStatusColors.current.ready
     val containerColor = if (isConnected) {
-        StatusReadyGreen.copy(alpha = 0.16f)
+        readyColor.copy(alpha = 0.16f)
     } else {
         MaterialTheme.colorScheme.surfaceContainerHigh
     }
     val contentColor = if (isConnected) {
-        StatusReadyGreen
+        readyColor
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant
     }
     val border = if (isConnected) {
-        BorderStroke(1.dp, StatusReadyGreen.copy(alpha = 0.4f))
+        BorderStroke(1.dp, readyColor.copy(alpha = 0.4f))
     } else {
         BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     }
@@ -438,4 +453,61 @@ private fun formatEpochUtc(epochMillis: Long): String {
         "${day.toString().padStart(2, '0')} " +
         "${hour.toString().padStart(2, '0')}:" +
         "${minute.toString().padStart(2, '0')} UTC"
+}
+
+@Composable
+private fun SettingsContentPreview(themeMode: AppThemeMode) {
+    BarFriendTheme(themeMode = themeMode) {
+        SettingsContent(
+            uiState = SettingsUiState(
+                serverUrl = "https://bar.example.com",
+                activeBarName = "Home Speakeasy",
+                isConnected = true,
+                preferredUnit = VolumeUnit.OZ,
+                themeMode = themeMode,
+                syncStatus = SyncStatus(
+                    isSyncing = false,
+                    lastSyncedEpochMillis = 1_700_000_000_000L,
+                ),
+            ),
+            onUnitSelected = {},
+            onThemeSelected = {},
+            onSyncNowClick = {},
+            onSignOutClick = {},
+        )
+    }
+}
+
+@Preview
+@Composable
+private fun SettingsContentDarkPreview() {
+    SettingsContentPreview(themeMode = AppThemeMode.DARK)
+}
+
+@Preview
+@Composable
+private fun SettingsContentLightPreview() {
+    SettingsContentPreview(themeMode = AppThemeMode.LIGHT)
+}
+
+@Preview
+@Composable
+private fun SignOutConfirmationDialogDarkPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.DARK) {
+        SignOutConfirmationDialog(
+            onConfirm = {},
+            onDismiss = {},
+        )
+    }
+}
+
+@Preview
+@Composable
+private fun SignOutConfirmationDialogLightPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.LIGHT) {
+        SignOutConfirmationDialog(
+            onConfirm = {},
+            onDismiss = {},
+        )
+    }
 }

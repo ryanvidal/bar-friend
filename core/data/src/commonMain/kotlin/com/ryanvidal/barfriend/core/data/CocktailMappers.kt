@@ -37,6 +37,9 @@ import com.ryanvidal.barfriend.core.network.dto.IngredientDto
 import com.ryanvidal.barfriend.core.network.dto.ScrapeResponseDto
 import com.ryanvidal.barfriend.core.network.dto.TagDto
 import com.ryanvidal.barfriend.core.network.dto.UtensilDto
+import io.ktor.http.URLBuilder
+import io.ktor.http.Url
+import io.ktor.http.encodedPath
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -73,6 +76,9 @@ internal data class StoredIngredientSubstitute(
     val slug: String,
     val name: String,
     val inBarShelf: Boolean = false,
+    val amount: Double? = null,
+    val amountMax: Double? = null,
+    val units: String? = null,
 )
 
 internal inline fun <reified T> decodeStoredList(json: String): List<T> =
@@ -87,8 +93,36 @@ internal fun resolveImageUrl(raw: String?, serverUrl: String?): String? {
     if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
         return trimmed
     }
-    val base = serverUrl?.takeIf { it.isNotBlank() }?.let { ServerUrlNormalizer.normalize(it) } ?: return trimmed
-    return "$base/${trimmed.trimStart('/')}"
+    val normalizedServer = serverUrl?.takeIf { it.isNotBlank() }
+        ?.let { runCatching { ServerUrlNormalizer.normalize(it) }.getOrNull() }
+        ?: return trimmed
+    val baseUrl = runCatching { Url(normalizedServer) }.getOrNull() ?: return trimmed
+    if (trimmed.startsWith("//")) {
+        return "${baseUrl.protocol.name}:$trimmed"
+    }
+
+    val basePath = baseUrl.encodedPath.trimEnd('/')
+    val querySplit = trimmed.indexOfAny(charArrayOf('?', '#'))
+    val rawPath = if (querySplit >= 0) trimmed.substring(0, querySplit) else trimmed
+    val suffix = if (querySplit >= 0) trimmed.substring(querySplit) else ""
+    val normalizedPath = if (
+        basePath.isNotEmpty() &&
+        (rawPath == basePath || rawPath.startsWith("$basePath/"))
+    ) {
+        rawPath
+    } else {
+        "$basePath/${rawPath.trimStart('/')}"
+    }
+
+    val origin = URLBuilder(baseUrl).apply {
+        user = null
+        password = null
+        encodedPath = ""
+        parameters.clear()
+        fragment = ""
+        trailingQuery = false
+    }.buildString().trimEnd('/')
+    return "$origin$normalizedPath$suffix"
 }
 
 fun CocktailDto.toEntityAndIngredients(
@@ -135,6 +169,9 @@ fun CocktailDto.toEntityAndIngredients(
                 slug = sub.ingredient.slug,
                 name = sub.ingredient.name,
                 inBarShelf = sub.inBarShelf,
+                amount = sub.amount,
+                amountMax = sub.amountMax,
+                units = sub.units,
             )
         }
         CocktailIngredientEntity(
@@ -153,6 +190,7 @@ fun CocktailDto.toEntityAndIngredients(
             inBarShelfAsVariant = ing.inBarShelfAsVariant,
             inBarShelfAsComplex = ing.inBarShelfAsComplexIngredient,
             substitutesJson = StorageJson.encodeToString(storedSubstitutes),
+            isSpecified = ing.isSpecified,
         )
     }
 
@@ -297,8 +335,12 @@ fun CocktailIngredientEntity.toModel(): CocktailIngredient = CocktailIngredient(
             slug = sub.slug,
             name = sub.name,
             inBarShelf = sub.inBarShelf,
+            amount = sub.amount,
+            amountMax = sub.amountMax,
+            units = sub.units,
         )
     },
+    isSpecified = isSpecified,
 )
 
 fun filterAndSortCocktails(

@@ -1,5 +1,6 @@
 package com.ryanvidal.barfriend.di
 
+import coil3.ImageLoader
 import com.ryanvidal.barfriend.core.data.AppPreferences
 import com.ryanvidal.barfriend.core.data.AuthRepository
 import com.ryanvidal.barfriend.core.data.CocktailRepository
@@ -22,6 +23,7 @@ interface AppGraph {
     val cocktailRepository: CocktailRepository
     val barAssistantApi: BarAssistantApi
     val imageHttpClient: ImageHttpClient
+    val imageLoader: ImageLoader
     val platformPaths: PlatformPaths
     val database: BarFriendDatabase
 

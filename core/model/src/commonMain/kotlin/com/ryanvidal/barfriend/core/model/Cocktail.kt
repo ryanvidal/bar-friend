@@ -56,6 +56,7 @@ data class CocktailIngredient(
     val inBarShelfAsVariant: Boolean = false,
     val inBarShelfAsComplex: Boolean = false,
     val substitutes: List<IngredientSubstitute>,
+    val isSpecified: Boolean = false,
 ) {
     val isAvailableInBar: Boolean
         get() = inBarShelf || inBarShelfAsSubstitute || inBarShelfAsVariant || inBarShelfAsComplex
@@ -66,6 +67,9 @@ data class IngredientSubstitute(
     val slug: String,
     val name: String,
     val inBarShelf: Boolean,
+    val amount: Double? = null,
+    val amountMax: Double? = null,
+    val units: String? = null,
 )
 
 data class CocktailMethod(

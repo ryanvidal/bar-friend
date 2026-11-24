@@ -37,7 +37,5 @@ jobs:
           distribution: temurin
           java-version: 25
       - uses: gradle/actions/setup-gradle@v4
-      - name: Link ComposeApp iOS Simulator Framework
-        run: ./gradlew :composeApp:linkDebugFrameworkIosSimulatorArm64 --stacktrace
       - name: Build iosApp in Xcode
-        run: xcodebuild -project iosApp/iosApp.xcodeproj -scheme iosApp -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+        run: xcodebuild -project iosApp/iosApp.xcodeproj -scheme iosApp -destination 'generic/platform=iOS Simulator' ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build

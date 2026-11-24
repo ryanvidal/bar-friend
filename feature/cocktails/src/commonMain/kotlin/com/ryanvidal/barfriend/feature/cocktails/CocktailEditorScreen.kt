@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
@@ -68,6 +70,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -80,25 +83,30 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigationevent.NavigationEventInfo
+import androidx.navigationevent.compose.NavigationBackHandler
+import androidx.navigationevent.compose.rememberNavigationEventState
 import coil3.compose.AsyncImage
+import com.ryanvidal.barfriend.core.designsystem.BarFriendTheme
+import com.ryanvidal.barfriend.core.designsystem.EmptyStateCard
+import com.ryanvidal.barfriend.core.designsystem.LocalBarFriendStatusColors
 import com.ryanvidal.barfriend.core.designsystem.SectionHeader
-import com.ryanvidal.barfriend.core.designsystem.StatusMissingTerracotta
-import com.ryanvidal.barfriend.core.designsystem.StatusReadyGreen
-import com.ryanvidal.barfriend.core.designsystem.StatusSubstituteAmber
+import com.ryanvidal.barfriend.core.model.AppThemeMode
+import com.ryanvidal.barfriend.core.model.BarCatalog
+import com.ryanvidal.barfriend.core.model.CocktailMethod
+import com.ryanvidal.barfriend.core.model.CocktailTag
+import com.ryanvidal.barfriend.core.model.Glass
 import com.ryanvidal.barfriend.core.model.IngredientSummary
 import io.github.vinceglb.filekit.PlatformFile
 import io.github.vinceglb.filekit.dialogs.FileKitOpenCameraSettings
 import io.github.vinceglb.filekit.dialogs.FileKitType
 import io.github.vinceglb.filekit.dialogs.compose.rememberCameraPickerLauncher
 import io.github.vinceglb.filekit.dialogs.compose.rememberFilePickerLauncher
-import io.github.vinceglb.filekit.mimeType
-import io.github.vinceglb.filekit.name
-import io.github.vinceglb.filekit.readBytes
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CocktailEditorScreen(
     viewModel: CocktailEditorViewModel,
@@ -109,11 +117,7 @@ fun CocktailEditorScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-
-    var showImportDialog by rememberSaveable { mutableStateOf(false) }
-    var showIngredientPicker by rememberSaveable { mutableStateOf(false) }
-    var pickerTargetRowKey by rememberSaveable { mutableStateOf<Long?>(null) }
-    var customTagDraft by rememberSaveable { mutableStateOf("") }
+    var showDiscardDialog by rememberSaveable { mutableStateOf(false) }
 
     // FileKit launchers must stay registered at the screen root, outside sheets/dialogs.
     val galleryLauncher = rememberFilePickerLauncher(
@@ -125,19 +129,7 @@ fun CocktailEditorScreen(
         },
     ) { file: PlatformFile? ->
         if (file != null) {
-            scope.launch {
-                runCatching {
-                    val bytes = file.readBytes()
-                    val mime = file.mimeType()?.let { "${it.primaryType}/${it.subtype}" }
-                    viewModel.addLocalPhoto(
-                        bytes = bytes,
-                        fileName = file.name,
-                        mimeType = mime,
-                    )
-                }.onFailure { error ->
-                    snackbarHostState.showSnackbar(error.message ?: "Unable to read selected photo.")
-                }
-            }
+            viewModel.addLocalPhoto(file)
         }
     }
 
@@ -150,30 +142,137 @@ fun CocktailEditorScreen(
         },
     ) { file: PlatformFile? ->
         if (file != null) {
-            scope.launch {
-                runCatching {
-                    val bytes = file.readBytes()
-                    val mime = file.mimeType()?.let { "${it.primaryType}/${it.subtype}" } ?: "image/jpeg"
-                    viewModel.addLocalPhoto(
-                        bytes = bytes,
-                        fileName = file.name,
-                        mimeType = mime,
-                    )
-                }.onFailure { error ->
-                    snackbarHostState.showSnackbar(error.message ?: "Unable to read captured photo.")
-                }
+            viewModel.addLocalPhoto(file)
+        }
+    }
+
+    val navigationEventState = rememberNavigationEventState(currentInfo = NavigationEventInfo.None)
+    NavigationBackHandler(
+        state = navigationEventState,
+        isBackEnabled = uiState.hasUnsavedChanges || uiState.isSaving,
+        onBackCompleted = {
+            if (!uiState.isSaving) {
+                showDiscardDialog = true
             }
+        },
+    )
+
+    val handleBack: () -> Unit = {
+        when {
+            uiState.isSaving -> Unit
+            uiState.hasUnsavedChanges -> showDiscardDialog = true
+            else -> onBack()
         }
     }
 
     LaunchedEffect(uiState.savedCocktailId) {
         val savedId = uiState.savedCocktailId
         if (savedId != null) {
+            viewModel.consumeSavedEvent()
             onSaved(savedId)
         }
     }
 
-    val isBusy = uiState.isSaving || uiState.isImporting || uiState.isLoadingExisting
+    CocktailEditorContent(
+        uiState = uiState,
+        onBack = handleBack,
+        onRetryLoad = viewModel::retryLoadExisting,
+        onSave = viewModel::save,
+        onImportFromUrl = viewModel::importFromUrl,
+        onOpenPhotoLibrary = { galleryLauncher.launch() },
+        onOpenCamera = { cameraLauncher.launch() },
+        onRemovePhoto = viewModel::removePhoto,
+        onNameChanged = viewModel::onNameChanged,
+        onDescriptionChanged = viewModel::onDescriptionChanged,
+        onGarnishChanged = viewModel::onGarnishChanged,
+        onSourceChanged = viewModel::onSourceChanged,
+        onGlassSelected = viewModel::onGlassSelected,
+        onMethodSelected = viewModel::onMethodSelected,
+        onToggleTag = viewModel::toggleTag,
+        onAddCustomTag = viewModel::addCustomTag,
+        onAddIngredient = viewModel::addIngredientRow,
+        onUpdateIngredientSelection = viewModel::updateIngredientSelection,
+        onUpdateIngredientRow = viewModel::updateIngredientRow,
+        onMoveIngredientUp = viewModel::moveIngredientUp,
+        onMoveIngredientDown = viewModel::moveIngredientDown,
+        onRemoveIngredientRow = viewModel::removeIngredientRow,
+        onInstructionsChanged = viewModel::onInstructionsChanged,
+        onClearError = viewModel::clearError,
+        snackbarHostState = snackbarHostState,
+        modifier = modifier,
+    )
+
+    if (showDiscardDialog) {
+        AlertDialog(
+            onDismissRequest = { showDiscardDialog = false },
+            title = { Text("Discard unsaved changes?") },
+            text = { Text("You have unsaved recipe edits that will be lost if you leave now.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDiscardDialog = false
+                        onBack()
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) {
+                    Text("Discard")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardDialog = false }) {
+                    Text("Keep Editing")
+                }
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CocktailEditorContent(
+    uiState: CocktailEditorUiState,
+    onBack: () -> Unit,
+    onRetryLoad: () -> Unit,
+    onSave: () -> Unit,
+    onImportFromUrl: (String) -> Unit,
+    onOpenPhotoLibrary: () -> Unit,
+    onOpenCamera: () -> Unit,
+    onRemovePhoto: (String) -> Unit,
+    onNameChanged: (String) -> Unit,
+    onDescriptionChanged: (String) -> Unit,
+    onGarnishChanged: (String) -> Unit,
+    onSourceChanged: (String) -> Unit,
+    onGlassSelected: (Int?) -> Unit,
+    onMethodSelected: (Int?) -> Unit,
+    onToggleTag: (String) -> Unit,
+    onAddCustomTag: (String) -> Unit,
+    onAddIngredient: (IngredientSummary) -> Unit,
+    onUpdateIngredientSelection: (Long, IngredientSummary) -> Unit,
+    onUpdateIngredientRow: (
+        localKey: Long,
+        amountText: String?,
+        amountMaxText: String?,
+        units: String?,
+        optional: Boolean?,
+        note: String?,
+    ) -> Unit,
+    onMoveIngredientUp: (Long) -> Unit,
+    onMoveIngredientDown: (Long) -> Unit,
+    onRemoveIngredientRow: (Long) -> Unit,
+    onInstructionsChanged: (String) -> Unit,
+    onClearError: () -> Unit,
+    modifier: Modifier = Modifier,
+    snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+) {
+    var showImportDialog by rememberSaveable { mutableStateOf(false) }
+    var showIngredientPicker by rememberSaveable { mutableStateOf(false) }
+    var pickerTargetRowKey by rememberSaveable { mutableStateOf<Long?>(null) }
+    var customTagDraft by rememberSaveable { mutableStateOf("") }
+
+    val isBusy = uiState.isBusy
+    val isFormEditable = !isBusy && (!uiState.isEditing || uiState.hasLoadedExisting)
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -184,20 +283,23 @@ fun CocktailEditorScreen(
                     Text(if (uiState.isEditing) "Edit Recipe" else "New Recipe")
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(
+                        onClick = onBack,
+                        enabled = !uiState.isSaving,
+                    ) {
                         Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
                     IconButton(
                         onClick = { showImportDialog = true },
-                        enabled = !isBusy,
+                        enabled = isFormEditable,
                     ) {
                         Icon(Icons.Rounded.Link, contentDescription = "Import from URL")
                     }
                     TextButton(
-                        onClick = viewModel::save,
-                        enabled = !isBusy,
+                        onClick = onSave,
+                        enabled = uiState.canSubmitSave,
                     ) {
                         if (uiState.isSaving) {
                             CircularProgressIndicator(
@@ -212,280 +314,332 @@ fun CocktailEditorScreen(
             )
         },
     ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
-        ) {
-            if (uiState.isLoadingExisting || uiState.isImporting || uiState.isSaving) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    Text(
-                        text = when {
-                            uiState.isLoadingExisting -> "Loading recipe..."
-                            uiState.isImporting -> "Importing recipe from URL..."
-                            else -> "Saving recipe and uploading photos..."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        when {
+            uiState.isEditing && !uiState.hasLoadedExisting && uiState.isLoadingExisting -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator()
+                }
+            }
+
+            uiState.isEditing && !uiState.hasLoadedExisting -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    EmptyStateCard(
+                        icon = Icons.Rounded.LocalBar,
+                        title = "Unable to load recipe",
+                        subtitle = uiState.errorMessage ?: "Connect to your Bar Assistant server and try again.",
+                        actionLabel = "Retry",
+                        onActionClick = onRetryLoad,
                     )
                 }
             }
 
-            uiState.errorMessage?.let { error ->
-                EditorErrorBanner(
-                    message = error,
-                    onDismiss = viewModel::clearError,
-                )
-            }
-
-            // Photos Section
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                SectionHeader(title = "Photos")
-                if (uiState.photos.isNotEmpty()) {
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        items(
-                            items = uiState.photos,
-                            key = { it.stableKey },
-                        ) { photo ->
-                            EditorPhotoThumbnail(
-                                item = photo,
-                                onRemove = { viewModel.removePhoto(photo.stableKey) },
+            else -> {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .imePadding()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                ) {
+                    if (isBusy) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            Text(
+                                text = when {
+                                    uiState.isLoadingExisting -> "Loading recipe..."
+                                    uiState.isImporting -> "Importing recipe from URL..."
+                                    uiState.isProcessingPhoto -> "Processing photo..."
+                                    else -> "Saving recipe and uploading photos..."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    OutlinedButton(
-                        onClick = { galleryLauncher.launch() },
-                        enabled = !isBusy,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.PhotoLibrary,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
+
+                    uiState.errorMessage?.let { error ->
+                        EditorErrorBanner(
+                            message = error,
+                            onDismiss = onClearError,
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Add Photo")
                     }
-                    OutlinedButton(
-                        onClick = { cameraLauncher.launch() },
-                        enabled = !isBusy,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.PhotoCamera,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Camera")
-                    }
-                }
-            }
 
-            // Basics Section
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                SectionHeader(title = "Details")
-                OutlinedTextField(
-                    value = uiState.name,
-                    onValueChange = viewModel::onNameChanged,
-                    label = { Text("Recipe Name *") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = uiState.description,
-                    onValueChange = viewModel::onDescriptionChanged,
-                    label = { Text("Description") },
-                    minLines = 2,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    EditorDropdownField(
-                        label = "Glass",
-                        selectedLabel = uiState.catalog.glasses
-                            .firstOrNull { it.id == uiState.glassId }?.name ?: "None",
-                        options = uiState.catalog.glasses.map { it.id to it.name },
-                        noneLabel = "None",
-                        onSelect = viewModel::onGlassSelected,
-                        modifier = Modifier.weight(1f),
-                    )
-                    EditorDropdownField(
-                        label = "Method",
-                        selectedLabel = uiState.catalog.methods
-                            .firstOrNull { it.id == uiState.methodId }?.name ?: "None",
-                        options = uiState.catalog.methods.map { it.id to it.name },
-                        noneLabel = "None",
-                        onSelect = viewModel::onMethodSelected,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-                OutlinedTextField(
-                    value = uiState.garnish,
-                    onValueChange = viewModel::onGarnishChanged,
-                    label = { Text("Garnish") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = uiState.source,
-                    onValueChange = viewModel::onSourceChanged,
-                    label = { Text("Source") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-
-            // Tags Section
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                SectionHeader(title = "Tags")
-                val displayedTags = remember(uiState.catalog.tags, uiState.tags) {
-                    val seen = mutableSetOf<String>()
-                    buildList {
-                        uiState.catalog.tags.forEach { tag ->
-                            if (seen.add(tag.name.lowercase())) add(tag.name)
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        SectionHeader(title = "Photos")
+                        if (uiState.photos.isNotEmpty()) {
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                items(
+                                    items = uiState.photos,
+                                    key = { it.stableKey },
+                                ) { photo ->
+                                    EditorPhotoThumbnail(
+                                        item = photo,
+                                        enabled = isFormEditable,
+                                        onRemove = { onRemovePhoto(photo.stableKey) },
+                                    )
+                                }
+                            }
                         }
-                        uiState.tags.forEach { custom ->
-                            if (seen.add(custom.lowercase())) add(custom)
-                        }
-                    }
-                }
-                if (displayedTags.isNotEmpty()) {
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        displayedTags.forEach { tagName ->
-                            val selected = uiState.tags.any { it.equals(tagName, ignoreCase = true) }
-                            FilterChip(
-                                selected = selected,
-                                onClick = { viewModel.toggleTag(tagName) },
-                                label = { Text(tagName) },
-                            )
-                        }
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedTextField(
-                        value = customTagDraft,
-                        onValueChange = { customTagDraft = it },
-                        label = { Text("Add custom tag") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f),
-                    )
-                    FilledTonalButton(
-                        onClick = {
-                            viewModel.addCustomTag(customTagDraft)
-                            customTagDraft = ""
-                        },
-                        enabled = customTagDraft.isNotBlank(),
-                    ) {
-                        Text("Add")
-                    }
-                }
-            }
-
-            // Ingredients Section
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                SectionHeader(
-                    title = "Ingredients (${uiState.ingredients.size})",
-                    trailing = {
-                        FilledTonalButton(
-                            onClick = {
-                                pickerTargetRowKey = null
-                                showIngredientPicker = true
-                            },
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Add,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Add Ingredient")
+                            OutlinedButton(
+                                onClick = onOpenPhotoLibrary,
+                                enabled = isFormEditable,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PhotoLibrary,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Add Photo")
+                            }
+                            OutlinedButton(
+                                onClick = onOpenCamera,
+                                enabled = isFormEditable,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PhotoCamera,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Camera")
+                            }
                         }
-                    },
-                )
+                    }
 
-                if (uiState.ingredients.isEmpty()) {
-                    OutlinedCard(
-                        shape = MaterialTheme.shapes.medium,
-                        modifier = Modifier.fillMaxWidth(),
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        SectionHeader(title = "Details")
+                        OutlinedTextField(
+                            value = uiState.name,
+                            onValueChange = onNameChanged,
+                            enabled = isFormEditable,
+                            label = { Text("Recipe Name *") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = uiState.description,
+                            onValueChange = onDescriptionChanged,
+                            enabled = isFormEditable,
+                            label = { Text("Description") },
+                            minLines = 2,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            EditorDropdownField(
+                                label = "Glass",
+                                selectedLabel = uiState.catalog.glasses
+                                    .firstOrNull { it.id == uiState.glassId }?.name ?: "None",
+                                options = uiState.catalog.glasses.map { it.id to it.name },
+                                noneLabel = "None",
+                                enabled = isFormEditable,
+                                onSelect = onGlassSelected,
+                                modifier = Modifier.weight(1f),
+                            )
+                            EditorDropdownField(
+                                label = "Method",
+                                selectedLabel = uiState.catalog.methods
+                                    .firstOrNull { it.id == uiState.methodId }?.name ?: "None",
+                                options = uiState.catalog.methods.map { it.id to it.name },
+                                noneLabel = "None",
+                                enabled = isFormEditable,
+                                onSelect = onMethodSelected,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        OutlinedTextField(
+                            value = uiState.garnish,
+                            onValueChange = onGarnishChanged,
+                            enabled = isFormEditable,
+                            label = { Text("Garnish") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = uiState.source,
+                            onValueChange = onSourceChanged,
+                            enabled = isFormEditable,
+                            label = { Text("Source") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        SectionHeader(title = "Tags")
+                        val displayedTags = remember(uiState.catalog.tags, uiState.tags) {
+                            val seen = mutableSetOf<String>()
+                            buildList {
+                                uiState.catalog.tags.forEach { tag ->
+                                    if (seen.add(tag.name.lowercase())) add(tag.name)
+                                }
+                                uiState.tags.forEach { custom ->
+                                    if (seen.add(custom.lowercase())) add(custom)
+                                }
+                            }
+                        }
+                        if (displayedTags.isNotEmpty()) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                displayedTags.forEach { tagName ->
+                                    val selected = uiState.tags.any { it.equals(tagName, ignoreCase = true) }
+                                    FilterChip(
+                                        selected = selected,
+                                        enabled = isFormEditable,
+                                        onClick = { onToggleTag(tagName) },
+                                        label = { Text(tagName) },
+                                    )
+                                }
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            OutlinedTextField(
+                                value = customTagDraft,
+                                onValueChange = { customTagDraft = it },
+                                enabled = isFormEditable,
+                                label = { Text("Add custom tag") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                            )
+                            FilledTonalButton(
+                                onClick = {
+                                    onAddCustomTag(customTagDraft)
+                                    customTagDraft = ""
+                                },
+                                enabled = isFormEditable && customTagDraft.isNotBlank(),
+                            ) {
+                                Text("Add")
+                            }
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        SectionHeader(
+                            title = "Ingredients (${uiState.ingredients.size})",
+                            trailing = {
+                                FilledTonalButton(
+                                    onClick = {
+                                        pickerTargetRowKey = null
+                                        showIngredientPicker = true
+                                    },
+                                    enabled = isFormEditable,
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Add,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Add Ingredient")
+                                }
+                            },
+                        )
+
+                        if (uiState.ingredients.isEmpty()) {
+                            OutlinedCard(
+                                shape = MaterialTheme.shapes.medium,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    text = "Tap \"Add Ingredient\" to pick ingredients from your bar catalog.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(16.dp),
+                                )
+                            }
+                        } else {
+                            uiState.ingredients.forEachIndexed { index, row ->
+                                key(row.localKey) {
+                                    EditorIngredientCard(
+                                        row = row,
+                                        enabled = isFormEditable,
+                                        canMoveUp = index > 0,
+                                        canMoveDown = index < uiState.ingredients.lastIndex,
+                                        onPickIngredient = {
+                                            pickerTargetRowKey = row.localKey
+                                            showIngredientPicker = true
+                                        },
+                                        onAmountChanged = { value ->
+                                            onUpdateIngredientRow(row.localKey, value, null, null, null, null)
+                                        },
+                                        onAmountMaxChanged = { value ->
+                                            onUpdateIngredientRow(row.localKey, null, value, null, null, null)
+                                        },
+                                        onUnitChanged = { value ->
+                                            onUpdateIngredientRow(row.localKey, null, null, value, null, null)
+                                        },
+                                        onOptionalToggled = {
+                                            onUpdateIngredientRow(row.localKey, null, null, null, !row.optional, null)
+                                        },
+                                        onNoteChanged = { value ->
+                                            onUpdateIngredientRow(row.localKey, null, null, null, null, value)
+                                        },
+                                        onMoveUp = { onMoveIngredientUp(row.localKey) },
+                                        onMoveDown = { onMoveIngredientDown(row.localKey) },
+                                        onRemove = { onRemoveIngredientRow(row.localKey) },
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SectionHeader(title = "Instructions *")
+                        OutlinedTextField(
+                            value = uiState.instructions,
+                            onValueChange = onInstructionsChanged,
+                            enabled = isFormEditable,
+                            placeholder = {
+                                Text("1. Combine ingredients with ice.\n2. Shake or stir until chilled.\n3. Strain into prepared glass.")
+                            },
+                            minLines = 5,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+
+                    Button(
+                        onClick = onSave,
+                        enabled = uiState.canSubmitSave,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
                     ) {
-                        Text(
-                            text = "Tap \"Add Ingredient\" to pick ingredients from your bar catalog.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(16.dp),
-                        )
+                        Text(if (uiState.isEditing) "Save Changes" else "Save Recipe")
                     }
-                } else {
-                    uiState.ingredients.forEachIndexed { index, row ->
-                        EditorIngredientCard(
-                            row = row,
-                            canMoveUp = index > 0,
-                            canMoveDown = index < uiState.ingredients.lastIndex,
-                            onPickIngredient = {
-                                pickerTargetRowKey = row.localKey
-                                showIngredientPicker = true
-                            },
-                            onAmountChanged = { viewModel.updateIngredientRow(row.localKey, amountText = it) },
-                            onAmountMaxChanged = { viewModel.updateIngredientRow(row.localKey, amountMaxText = it) },
-                            onUnitChanged = { viewModel.updateIngredientRow(row.localKey, units = it) },
-                            onOptionalToggled = {
-                                viewModel.updateIngredientRow(row.localKey, optional = !row.optional)
-                            },
-                            onNoteChanged = { viewModel.updateIngredientRow(row.localKey, note = it) },
-                            onMoveUp = { viewModel.moveIngredientUp(row.localKey) },
-                            onMoveDown = { viewModel.moveIngredientDown(row.localKey) },
-                            onRemove = { viewModel.removeIngredientRow(row.localKey) },
-                        )
-                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
                 }
             }
-
-            // Instructions Section
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SectionHeader(title = "Instructions *")
-                OutlinedTextField(
-                    value = uiState.instructions,
-                    onValueChange = viewModel::onInstructionsChanged,
-                    placeholder = {
-                        Text("1. Combine ingredients with ice.\n2. Shake or stir until chilled.\n3. Strain into prepared glass.")
-                    },
-                    minLines = 5,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-
-            Button(
-                onClick = viewModel::save,
-                enabled = !isBusy,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-            ) {
-                Text(if (uiState.isEditing) "Save Changes" else "Save Recipe")
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 
@@ -494,7 +648,7 @@ fun CocktailEditorScreen(
             onDismiss = { showImportDialog = false },
             onImport = { url ->
                 showImportDialog = false
-                viewModel.importFromUrl(url)
+                onImportFromUrl(url)
             },
         )
     }
@@ -506,9 +660,9 @@ fun CocktailEditorScreen(
             onSelect = { ingredient ->
                 val targetKey = pickerTargetRowKey
                 if (targetKey == null) {
-                    viewModel.addIngredientRow(ingredient)
+                    onAddIngredient(ingredient)
                 } else {
-                    viewModel.updateIngredientSelection(targetKey, ingredient)
+                    onUpdateIngredientSelection(targetKey, ingredient)
                 }
                 showIngredientPicker = false
             },
@@ -521,10 +675,11 @@ private fun EditorErrorBanner(
     message: String,
     onDismiss: () -> Unit,
 ) {
+    val missingColor = LocalBarFriendStatusColors.current.missing
     Surface(
         shape = MaterialTheme.shapes.medium,
-        color = StatusMissingTerracotta.copy(alpha = 0.14f),
-        border = BorderStroke(1.dp, StatusMissingTerracotta.copy(alpha = 0.45f)),
+        color = missingColor.copy(alpha = 0.14f),
+        border = BorderStroke(1.dp, missingColor.copy(alpha = 0.45f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
@@ -535,7 +690,7 @@ private fun EditorErrorBanner(
             Icon(
                 imageVector = Icons.Rounded.WarningAmber,
                 contentDescription = null,
-                tint = StatusMissingTerracotta,
+                tint = missingColor,
             )
             Text(
                 text = message,
@@ -553,6 +708,7 @@ private fun EditorErrorBanner(
 @Composable
 private fun EditorPhotoThumbnail(
     item: EditorPhotoItem,
+    enabled: Boolean,
     onRemove: () -> Unit,
 ) {
     val model: Any = when (item) {
@@ -586,22 +742,25 @@ private fun EditorPhotoThumbnail(
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
         )
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+        IconButton(
+            onClick = onRemove,
+            enabled = enabled,
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(6.dp),
+                .size(48.dp),
         ) {
-            IconButton(
-                onClick = onRemove,
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
                 modifier = Modifier.size(28.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Close,
-                    contentDescription = "Remove photo",
-                    modifier = Modifier.size(16.dp),
-                )
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Remove photo",
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
             }
         }
         if (badgeLabel != null) {
@@ -630,29 +789,31 @@ private fun EditorDropdownField(
     selectedLabel: String,
     options: List<Pair<Int, String>>,
     noneLabel: String,
+    enabled: Boolean,
     onSelect: (Int?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
 
     ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = !expanded },
+        expanded = expanded && enabled,
+        onExpandedChange = { if (enabled) expanded = it },
         modifier = modifier,
     ) {
         OutlinedTextField(
             value = selectedLabel,
             onValueChange = {},
             readOnly = true,
+            enabled = enabled,
             label = { Text(label) },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded && enabled) },
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
-                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled = enabled),
         )
         ExposedDropdownMenu(
-            expanded = expanded,
+            expanded = expanded && enabled,
             onDismissRequest = { expanded = false },
         ) {
             DropdownMenuItem(
@@ -675,10 +836,10 @@ private fun EditorDropdownField(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EditorIngredientCard(
     row: EditorIngredientRow,
+    enabled: Boolean,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
     onPickIngredient: () -> Unit,
@@ -691,6 +852,7 @@ private fun EditorIngredientCard(
     onMoveDown: () -> Unit,
     onRemove: () -> Unit,
 ) {
+    val substituteColor = LocalBarFriendStatusColors.current.substitute
     val isUnmatched = row.ingredientId == null
     OutlinedCard(
         shape = MaterialTheme.shapes.medium,
@@ -699,7 +861,7 @@ private fun EditorIngredientCard(
         ),
         border = BorderStroke(
             width = 1.dp,
-            color = if (isUnmatched) StatusSubstituteAmber else MaterialTheme.colorScheme.outlineVariant,
+            color = if (isUnmatched) substituteColor else MaterialTheme.colorScheme.outlineVariant,
         ),
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -715,13 +877,13 @@ private fun EditorIngredientCard(
                     Icon(
                         imageVector = Icons.Rounded.WarningAmber,
                         contentDescription = null,
-                        tint = StatusSubstituteAmber,
+                        tint = substituteColor,
                         modifier = Modifier.size(16.dp),
                     )
                     Text(
                         text = "Unmatched: ${row.unmatchedScrapedHint ?: row.ingredientName.ifBlank { "Select ingredient" }}",
                         style = MaterialTheme.typography.labelMedium,
-                        color = StatusSubstituteAmber,
+                        color = substituteColor,
                     )
                 }
             }
@@ -733,6 +895,7 @@ private fun EditorIngredientCard(
             ) {
                 Surface(
                     onClick = onPickIngredient,
+                    enabled = enabled,
                     shape = MaterialTheme.shapes.small,
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     modifier = Modifier.weight(1f),
@@ -754,20 +917,20 @@ private fun EditorIngredientCard(
                             color = if (row.ingredientId != null) {
                                 MaterialTheme.colorScheme.onSurface
                             } else {
-                                StatusSubstituteAmber
+                                substituteColor
                             },
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
-                IconButton(onClick = onMoveUp, enabled = canMoveUp) {
+                IconButton(onClick = onMoveUp, enabled = enabled && canMoveUp) {
                     Icon(Icons.Rounded.KeyboardArrowUp, contentDescription = "Move up")
                 }
-                IconButton(onClick = onMoveDown, enabled = canMoveDown) {
+                IconButton(onClick = onMoveDown, enabled = enabled && canMoveDown) {
                     Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = "Move down")
                 }
-                IconButton(onClick = onRemove) {
+                IconButton(onClick = onRemove, enabled = enabled) {
                     Icon(Icons.Rounded.DeleteOutline, contentDescription = "Remove ingredient")
                 }
             }
@@ -779,7 +942,8 @@ private fun EditorIngredientCard(
                 OutlinedTextField(
                     value = row.amountText,
                     onValueChange = onAmountChanged,
-                    label = { Text("Amount *") },
+                    enabled = enabled,
+                    label = { Text("Amount") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.weight(1f),
@@ -787,15 +951,11 @@ private fun EditorIngredientCard(
                 OutlinedTextField(
                     value = row.amountMaxText,
                     onValueChange = onAmountMaxChanged,
+                    enabled = enabled,
                     label = { Text("Max") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.weight(0.9f),
-                )
-                UnitDropdownField(
-                    selectedUnit = row.units,
-                    onSelectUnit = onUnitChanged,
-                    modifier = Modifier.weight(1.1f),
+                    modifier = Modifier.weight(1f),
                 )
             }
 
@@ -804,19 +964,28 @@ private fun EditorIngredientCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                UnitDropdownField(
+                    selectedUnit = row.units,
+                    enabled = enabled,
+                    onSelectUnit = onUnitChanged,
+                    modifier = Modifier.weight(1f),
+                )
                 FilterChip(
                     selected = row.optional,
+                    enabled = enabled,
                     onClick = onOptionalToggled,
                     label = { Text("Optional") },
                 )
-                OutlinedTextField(
-                    value = row.note,
-                    onValueChange = onNoteChanged,
-                    label = { Text("Note") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
             }
+
+            OutlinedTextField(
+                value = row.note,
+                onValueChange = onNoteChanged,
+                enabled = enabled,
+                label = { Text("Note") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }
@@ -825,31 +994,40 @@ private fun EditorIngredientCard(
 @Composable
 private fun UnitDropdownField(
     selectedUnit: String,
+    enabled: Boolean,
     onSelectUnit: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
 
     ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = !expanded },
+        expanded = expanded && enabled,
+        onExpandedChange = { if (enabled) expanded = it },
         modifier = modifier,
     ) {
         OutlinedTextField(
             value = selectedUnit,
-            onValueChange = {},
-            readOnly = true,
+            onValueChange = onSelectUnit,
+            enabled = enabled,
             label = { Text("Unit") },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            placeholder = { Text("None / custom") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded && enabled) },
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
-                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable, enabled = enabled),
         )
         ExposedDropdownMenu(
-            expanded = expanded,
+            expanded = expanded && enabled,
             onDismissRequest = { expanded = false },
         ) {
+            DropdownMenuItem(
+                text = { Text("None (unitless)") },
+                onClick = {
+                    onSelectUnit("")
+                    expanded = false
+                },
+            )
             EDITOR_MEASUREMENT_UNITS.forEach { unit ->
                 DropdownMenuItem(
                     text = { Text(unit) },
@@ -870,6 +1048,7 @@ private fun IngredientPickerSheet(
     onDismiss: () -> Unit,
     onSelect: (IngredientSummary) -> Unit,
 ) {
+    val readyColor = LocalBarFriendStatusColors.current.ready
     var query by rememberSaveable { mutableStateOf("") }
     val filtered = remember(ingredients, query) {
         val needle = query.trim()
@@ -890,6 +1069,7 @@ private fun IngredientPickerSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .imePadding()
                 .heightIn(min = 320.dp, max = 560.dp)
                 .padding(horizontal = 16.dp)
                 .padding(bottom = 16.dp),
@@ -951,12 +1131,12 @@ private fun IngredientPickerSheet(
                                 {
                                     Surface(
                                         shape = MaterialTheme.shapes.small,
-                                        color = StatusReadyGreen.copy(alpha = 0.16f),
+                                        color = readyColor.copy(alpha = 0.16f),
                                     ) {
                                         Text(
                                             text = "In Bar",
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = StatusReadyGreen,
+                                            color = readyColor,
                                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                         )
                                     }
@@ -1020,5 +1200,86 @@ private fun EditorImportUrlDialog(
                 Text("Cancel")
             }
         },
+    )
+}
+
+private fun previewEditorUiState(): CocktailEditorUiState = CocktailEditorUiState(
+    isEditing = true,
+    hasLoadedExisting = true,
+    name = "Negroni",
+    description = "Equal parts gin, Campari, and sweet vermouth.",
+    garnish = "Orange peel",
+    source = "IBA",
+    glassId = 10,
+    methodId = 20,
+    tags = listOf("Classic", "Bitter"),
+    instructions = "1. Add all ingredients to a mixing glass with ice.\n2. Stir until well chilled.\n3. Strain over a large ice cube.",
+    catalog = BarCatalog(
+        glasses = listOf(Glass(10, "Rocks", 250.0, "ml"), Glass(11, "Coupe", 160.0, "ml")),
+        methods = listOf(CocktailMethod(20, "Stir", 20), CocktailMethod(21, "Shake", 25)),
+        tags = listOf(CocktailTag(1, "Classic"), CocktailTag(2, "Bitter"), CocktailTag(3, "Aperitivo")),
+    ),
+    ingredients = listOf(
+        EditorIngredientRow(
+            localKey = 1L,
+            ingredientId = 1,
+            ingredientName = "London Dry Gin",
+            amountText = "1",
+            units = "oz",
+        ),
+        EditorIngredientRow(
+            localKey = 2L,
+            ingredientId = null,
+            ingredientName = "Campari",
+            amountText = "1",
+            units = "oz",
+            unmatchedScrapedHint = "1 oz Campari",
+        ),
+    ),
+)
+
+@Preview
+@Composable
+private fun CocktailEditorContentDarkPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.DARK) {
+        CocktailEditorPreviewHost()
+    }
+}
+
+@Preview
+@Composable
+private fun CocktailEditorContentLightPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.LIGHT) {
+        CocktailEditorPreviewHost()
+    }
+}
+
+@Composable
+private fun CocktailEditorPreviewHost() {
+    CocktailEditorContent(
+        uiState = previewEditorUiState(),
+        onBack = {},
+        onRetryLoad = {},
+        onSave = {},
+        onImportFromUrl = {},
+        onOpenPhotoLibrary = {},
+        onOpenCamera = {},
+        onRemovePhoto = {},
+        onNameChanged = {},
+        onDescriptionChanged = {},
+        onGarnishChanged = {},
+        onSourceChanged = {},
+        onGlassSelected = {},
+        onMethodSelected = {},
+        onToggleTag = {},
+        onAddCustomTag = {},
+        onAddIngredient = {},
+        onUpdateIngredientSelection = { _, _ -> },
+        onUpdateIngredientRow = { _, _, _, _, _, _ -> },
+        onMoveIngredientUp = {},
+        onMoveIngredientDown = {},
+        onRemoveIngredientRow = {},
+        onInstructionsChanged = {},
+        onClearError = {},
     )
 }

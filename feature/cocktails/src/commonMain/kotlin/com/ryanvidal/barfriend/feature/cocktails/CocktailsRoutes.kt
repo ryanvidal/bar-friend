@@ -13,4 +13,5 @@ data class CocktailDetailRoute(val cocktailId: Int) : NavKey
 data class CocktailEditorRoute(
     val cocktailId: Int? = null,
     val initialImportUrl: String? = null,
+    val sessionId: Long = 0L,
 ) : NavKey

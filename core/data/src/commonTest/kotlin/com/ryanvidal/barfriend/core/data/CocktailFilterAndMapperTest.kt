@@ -312,6 +312,83 @@ class CocktailFilterAndMapperTest {
         assertNull(mapped.ingredients[1].sourceLine)
     }
 
+    @Test
+    fun `cocktail ingredient substitute amounts and isSpecified round-trip through entity`() {
+        val dto = CocktailDto(
+            id = 50,
+            slug = "old-fashioned",
+            name = "Old Fashioned",
+            instructions = "Stir.",
+            ingredients = listOf(
+                CocktailIngredientDto(
+                    sort = 1,
+                    amount = 60.0,
+                    units = "ml",
+                    isSpecified = true,
+                    ingredient = IngredientBasicDto(1, "bourbon", "Bourbon"),
+                    substitutes = listOf(
+                        CocktailIngredientSubstituteDto(
+                            ingredient = IngredientBasicDto(2, "rye", "Rye Whiskey"),
+                            amount = 45.0,
+                            amountMax = 60.0,
+                            units = "ml",
+                            inBarShelf = true,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val (entity, ingredientEntities) = dto.toEntityAndIngredients(barId = 1)
+        val detail = CocktailWithIngredients(entity, ingredientEntities).toCocktailDetail()
+        val ingredient = detail.ingredients.single()
+        assertTrue(ingredient.isSpecified)
+        val sub = ingredient.substitutes.single()
+        assertEquals(45.0, sub.amount)
+        assertEquals(60.0, sub.amountMax)
+        assertEquals("ml", sub.units)
+        assertTrue(sub.inBarShelf)
+    }
+
+    @Test
+    fun `resolveImageUrl handles subpaths, root-relative, and protocol-relative urls`() {
+        assertEquals(
+            "https://host.example.com/bar/uploads/1.jpg",
+            resolveImageUrl("/bar/uploads/1.jpg", "https://host.example.com/bar"),
+        )
+        assertEquals(
+            "https://host.example.com/bar/uploads/1.jpg",
+            resolveImageUrl("/uploads/1.jpg", "https://host.example.com/bar"),
+        )
+        assertEquals(
+            "https://host.example.com/bar/uploads/1.jpg?w=200",
+            resolveImageUrl("uploads/1.jpg?w=200", "https://host.example.com/bar"),
+        )
+        assertEquals(
+            "https://cdn.example.com/1.jpg",
+            resolveImageUrl("//cdn.example.com/1.jpg", "https://host.example.com/bar"),
+        )
+        assertEquals(
+            "http://cdn.example.com/1.jpg",
+            resolveImageUrl("//cdn.example.com/1.jpg", "http://192.168.1.20:8080"),
+        )
+    }
+
+    @Test
+    fun `CocktailFilter hasActiveFilters ignores sort alone`() {
+        assertFalse(CocktailFilter().hasActiveFilters)
+        assertFalse(CocktailFilter(sort = CocktailSort.ABV_DESC).hasActiveFilters)
+        assertFalse(CocktailFilter(query = "   ").hasActiveFilters)
+        assertTrue(CocktailFilter(query = "gin").hasActiveFilters)
+        assertTrue(CocktailFilter(canMakeOnly = true).hasActiveFilters)
+        assertTrue(CocktailFilter(favoritesOnly = true).hasActiveFilters)
+        assertTrue(CocktailFilter(tagIds = setOf(1)).hasActiveFilters)
+        assertTrue(CocktailFilter(glassId = 1).hasActiveFilters)
+        assertTrue(CocktailFilter(methodId = 1).hasActiveFilters)
+        assertTrue(CocktailFilter(abvMin = 10.0).hasActiveFilters)
+        assertTrue(CocktailFilter(abvMax = 30.0).hasActiveFilters)
+    }
+
     private fun relationItem(
         id: Int,
         name: String,

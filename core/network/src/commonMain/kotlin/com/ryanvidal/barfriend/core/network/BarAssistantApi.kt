@@ -41,8 +41,13 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
+import io.ktor.http.URLBuilder
+import io.ktor.http.Url
+import io.ktor.http.appendPathSegments
+import io.ktor.http.content.TextContent
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
+import io.ktor.http.takeFrom
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 
@@ -50,7 +55,13 @@ interface BarAssistantApi {
     suspend fun getServerVersion(serverUrl: String): ServerVersionDto
     suspend fun login(serverUrl: String, email: String, password: String): TokenDto
     suspend fun logout()
-    suspend fun getBars(): List<BarDto>
+    suspend fun getBars(page: Int = 1, perPage: Int = 100): PaginatedEnvelope<BarDto>
+    suspend fun getBars(
+        serverUrl: String,
+        token: String,
+        page: Int = 1,
+        perPage: Int = 100,
+    ): PaginatedEnvelope<BarDto>
     suspend fun getCocktails(
         page: Int = 1,
         perPage: Int = 25,
@@ -75,10 +86,10 @@ interface BarAssistantApi {
     ): ImageDto
     suspend fun scrapeCocktail(url: String): ScrapeResponseDto
     suspend fun getIngredients(page: Int = 1, perPage: Int = 200): PaginatedEnvelope<IngredientDto>
-    suspend fun getGlasses(): List<GlassDto>
-    suspend fun getCocktailMethods(): List<CocktailMethodDto>
-    suspend fun getTags(): List<TagDto>
-    suspend fun getUtensils(): List<UtensilDto>
+    suspend fun getGlasses(page: Int = 1, perPage: Int = 100): PaginatedEnvelope<GlassDto>
+    suspend fun getCocktailMethods(page: Int = 1, perPage: Int = 100): PaginatedEnvelope<CocktailMethodDto>
+    suspend fun getTags(page: Int = 1, perPage: Int = 100): PaginatedEnvelope<TagDto>
+    suspend fun getUtensils(page: Int = 1, perPage: Int = 100): PaginatedEnvelope<UtensilDto>
     suspend fun getBarInventoryIngredientIds(
         barId: Int,
         page: Int = 1,
@@ -96,13 +107,16 @@ class KtorBarAssistantApi(
 
     override suspend fun getServerVersion(serverUrl: String): ServerVersionDto {
         val base = ServerUrlNormalizer.apiBaseUrl(serverUrl)
-        val response = httpClient.get("$base/server/version")
+        val response = httpClient.get("$base/server/version") {
+            attributes.put(UnauthenticatedRequestKey, true)
+        }
         return response.decodeSuccess<DataEnvelope<ServerVersionDto>>().data
     }
 
     override suspend fun login(serverUrl: String, email: String, password: String): TokenDto {
         val base = ServerUrlNormalizer.apiBaseUrl(serverUrl)
         val response = httpClient.post("$base/auth/login") {
+            attributes.put(UnauthenticatedRequestKey, true)
             contentType(ContentType.Application.Json)
             setBody(LoginRequestDto(email = email, password = password))
         }
@@ -117,10 +131,29 @@ class KtorBarAssistantApi(
         }
     }
 
-    override suspend fun getBars(): List<BarDto> {
+    override suspend fun getBars(page: Int, perPage: Int): PaginatedEnvelope<BarDto> {
         val base = requireApiBaseUrl()
-        val response = httpClient.get("$base/bars")
-        return response.decodeSuccess<PaginatedEnvelope<BarDto>>().data
+        val response = httpClient.get("$base/bars") {
+            parameter("page", page)
+            parameter("per_page", perPage)
+        }
+        return response.decodeSuccess()
+    }
+
+    override suspend fun getBars(
+        serverUrl: String,
+        token: String,
+        page: Int,
+        perPage: Int,
+    ): PaginatedEnvelope<BarDto> {
+        val normalized = ServerUrlNormalizer.normalize(serverUrl)
+        val base = ServerUrlNormalizer.apiBaseUrl(normalized)
+        val response = httpClient.get("$base/bars") {
+            attributes.put(ExplicitAuthContextKey, ExplicitAuthContext(normalized, token))
+            parameter("page", page)
+            parameter("per_page", perPage)
+        }
+        return response.decodeSuccess()
     }
 
     override suspend fun getCocktails(
@@ -142,23 +175,27 @@ class KtorBarAssistantApi(
 
     override suspend fun getCocktail(idOrSlug: String): CocktailDto {
         val base = requireApiBaseUrl()
-        val response = httpClient.get("$base/cocktails/$idOrSlug")
+        val response = httpClient.get {
+            url {
+                takeFrom(base)
+                appendPathSegments("cocktails", idOrSlug)
+            }
+        }
         return response.decodeSuccess<DataEnvelope<CocktailDto>>().data
     }
 
     override suspend fun createCocktail(request: CocktailWriteRequestDto): CocktailDto {
         val base = requireApiBaseUrl()
+        val jsonBody = BarAssistantWriteJson.encodeToString(CocktailWriteRequestDto.serializer(), request)
         val response = httpClient.post("$base/cocktails") {
-            contentType(ContentType.Application.Json)
-            setBody(request)
+            setBody(TextContent(jsonBody, ContentType.Application.Json))
         }
         if (!response.status.isSuccess()) {
             throw response.toApiException()
         }
-        val slugOrId = response.headers[HttpHeaders.Location]
-            ?.trimEnd('/')
-            ?.substringAfterLast('/')
-            ?.takeIf { it.isNotBlank() }
+        val slugOrId = response.headers[HttpHeaders.Location]?.let { location ->
+            parseCocktailSlugOrIdFromLocation(base, location)
+        }
         if (slugOrId != null) {
             return getCocktail(slugOrId)
         }
@@ -182,9 +219,9 @@ class KtorBarAssistantApi(
         request: CocktailWriteRequestDto,
     ): CocktailDto {
         val base = requireApiBaseUrl()
+        val jsonBody = BarAssistantWriteJson.encodeToString(CocktailWriteRequestDto.serializer(), request)
         val response = httpClient.put("$base/cocktails/$cocktailId") {
-            contentType(ContentType.Application.Json)
-            setBody(request)
+            setBody(TextContent(jsonBody, ContentType.Application.Json))
         }
         if (!response.status.isSuccess()) {
             throw response.toApiException()
@@ -285,28 +322,43 @@ class KtorBarAssistantApi(
         return response.decodeSuccess()
     }
 
-    override suspend fun getGlasses(): List<GlassDto> {
+    override suspend fun getGlasses(page: Int, perPage: Int): PaginatedEnvelope<GlassDto> {
         val base = requireApiBaseUrl()
-        val response = httpClient.get("$base/glasses")
-        return response.decodeSuccess<PaginatedEnvelope<GlassDto>>().data
+        val response = httpClient.get("$base/glasses") {
+            parameter("page", page)
+            parameter("per_page", perPage)
+        }
+        return response.decodeSuccess()
     }
 
-    override suspend fun getCocktailMethods(): List<CocktailMethodDto> {
+    override suspend fun getCocktailMethods(
+        page: Int,
+        perPage: Int,
+    ): PaginatedEnvelope<CocktailMethodDto> {
         val base = requireApiBaseUrl()
-        val response = httpClient.get("$base/cocktail-methods")
-        return response.decodeSuccess<PaginatedEnvelope<CocktailMethodDto>>().data
+        val response = httpClient.get("$base/cocktail-methods") {
+            parameter("page", page)
+            parameter("per_page", perPage)
+        }
+        return response.decodeSuccess()
     }
 
-    override suspend fun getTags(): List<TagDto> {
+    override suspend fun getTags(page: Int, perPage: Int): PaginatedEnvelope<TagDto> {
         val base = requireApiBaseUrl()
-        val response = httpClient.get("$base/tags")
-        return response.decodeSuccess<PaginatedEnvelope<TagDto>>().data
+        val response = httpClient.get("$base/tags") {
+            parameter("page", page)
+            parameter("per_page", perPage)
+        }
+        return response.decodeSuccess()
     }
 
-    override suspend fun getUtensils(): List<UtensilDto> {
+    override suspend fun getUtensils(page: Int, perPage: Int): PaginatedEnvelope<UtensilDto> {
         val base = requireApiBaseUrl()
-        val response = httpClient.get("$base/utensils")
-        return response.decodeSuccess<PaginatedEnvelope<UtensilDto>>().data
+        val response = httpClient.get("$base/utensils") {
+            parameter("page", page)
+            parameter("per_page", perPage)
+        }
+        return response.decodeSuccess()
     }
 
     override suspend fun getBarInventoryIngredientIds(
@@ -320,6 +372,15 @@ class KtorBarAssistantApi(
             parameter("per_page", perPage)
         }
         return response.decodeSuccess()
+    }
+
+    private fun parseCocktailSlugOrIdFromLocation(base: String, location: String): String? {
+        val parsed = runCatching {
+            URLBuilder(Url(base)).takeFrom(location).build()
+        }.getOrNull() ?: return null
+        return parsed.segments
+            .lastOrNull { it.isNotBlank() }
+            ?.takeIf { !it.equals("cocktails", ignoreCase = true) }
     }
 
     private suspend fun requireApiBaseUrl(): String {

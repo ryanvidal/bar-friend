@@ -4,11 +4,15 @@ import com.ryanvidal.barfriend.core.data.AuthRepository
 import com.ryanvidal.barfriend.core.data.ServerCheckResult
 import com.ryanvidal.barfriend.core.model.Bar
 import com.ryanvidal.barfriend.core.model.ServerInfo
+import com.ryanvidal.barfriend.core.network.BarAssistantApiException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlin.test.AfterTest
@@ -188,6 +192,191 @@ class AuthViewModelTest {
         assertNull(viewModel.uiState.value.serverStatus)
     }
 
+    @Test
+    fun `editing serverUrl cancels in-flight checkServer and clears loading`() = runTest(testDispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        var checkCancelled = false
+        val repository = FakeAuthRepository(
+            onCheckServer = {
+                try {
+                    gate.await()
+                    ServerCheckResult.Compatible(
+                        ServerInfo("6.2.0", null, isPasswordLoginEnabled = true, isAiEnabled = false, isAiImageEnabled = false),
+                    )
+                } catch (e: CancellationException) {
+                    checkCancelled = true
+                    throw e
+                }
+            },
+        )
+        val viewModel = AuthViewModel(repository)
+
+        viewModel.onServerUrlChanged("https://bar.example.com")
+        viewModel.checkServer()
+        runCurrent()
+        assertTrue(viewModel.uiState.value.isCheckingServer)
+
+        viewModel.onServerUrlChanged("https://other.example.com")
+        val stateAfterEdit = viewModel.uiState.value
+        assertFalse(stateAfterEdit.isCheckingServer)
+        assertNull(stateAfterEdit.serverStatus)
+        assertNull(stateAfterEdit.errorMessage)
+        assertFalse(stateAfterEdit.showLocalNetworkHintAfterFailure)
+
+        runCurrent()
+        assertTrue(checkCancelled)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertNull(viewModel.uiState.value.serverStatus)
+    }
+
+    @Test
+    fun `signIn success clears password, passwordVisible, serverStatus, and local network hint`() = runTest(testDispatcher) {
+        val repository = FakeAuthRepository(
+            checkResult = ServerCheckResult.Compatible(
+                ServerInfo("6.2.0", null, isPasswordLoginEnabled = true, isAiEnabled = false, isAiImageEnabled = false),
+            ),
+            signInResult = Result.success(
+                Bar(
+                    id = 1,
+                    name = "Home Lounge",
+                    subtitle = null,
+                    description = null,
+                    slug = "home-lounge",
+                    isActive = true,
+                ),
+            ),
+        )
+        val viewModel = AuthViewModel(repository)
+
+        viewModel.onServerUrlChanged("https://bar.example.com")
+        viewModel.checkServer()
+        advanceUntilIdle()
+        viewModel.onEmailChanged("ryan@example.com")
+        viewModel.onPasswordChanged("secret-pass")
+        viewModel.onTogglePasswordVisibility()
+        assertTrue(viewModel.uiState.value.passwordVisible)
+
+        viewModel.signIn()
+        advanceUntilIdle()
+
+        val state = viewModel.uiState.value
+        assertEquals("", state.password)
+        assertFalse(state.passwordVisible)
+        assertNull(state.serverStatus)
+        assertNull(state.errorMessage)
+        assertFalse(state.showLocalNetworkHintAfterFailure)
+    }
+
+    @Test
+    fun `domain network or timeout failure sets showLocalNetworkHintAfterFailure`() = runTest(testDispatcher) {
+        val repository = FakeAuthRepository(
+            checkResult = ServerCheckResult.Error("Connection timed out"),
+        )
+        val viewModel = AuthViewModel(repository)
+
+        viewModel.onServerUrlChanged("https://bar.example.com")
+        viewModel.checkServer()
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.showLocalNetworkHintAfterFailure)
+
+        viewModel.onServerUrlChanged("http://192.168.1.50")
+        assertFalse(viewModel.uiState.value.showLocalNetworkHintAfterFailure)
+        viewModel.checkServer()
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.showLocalNetworkHintAfterFailure)
+    }
+
+    @Test
+    fun `signIn network failure on domain sets hint while HTTP API failure does not`() = runTest(testDispatcher) {
+        val repository = FakeAuthRepository(
+            signInResult = Result.failure(IllegalStateException("Could not connect to Bar Assistant server.")),
+        )
+        val viewModel = AuthViewModel(repository)
+
+        viewModel.onServerUrlChanged("https://bar.example.com")
+        viewModel.onEmailChanged("ryan@example.com")
+        viewModel.onPasswordChanged("secret-pass")
+        viewModel.signIn()
+        advanceUntilIdle()
+        assertTrue(viewModel.uiState.value.showLocalNetworkHintAfterFailure)
+
+        repository.signInResult = Result.failure(BarAssistantApiException(401, "Invalid credentials"))
+        viewModel.signIn()
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.showLocalNetworkHintAfterFailure)
+    }
+
+    @Test
+    fun `signIn interrupting checkServer cancels check and clears isCheckingServer`() = runTest(testDispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        var checkCancelled = false
+        val repository = FakeAuthRepository(
+            onCheckServer = {
+                try {
+                    gate.await()
+                    ServerCheckResult.Compatible(
+                        ServerInfo("6.2.0", null, isPasswordLoginEnabled = true, isAiEnabled = false, isAiImageEnabled = false),
+                    )
+                } catch (e: CancellationException) {
+                    checkCancelled = true
+                    throw e
+                }
+            },
+            signInResult = Result.success(
+                Bar(
+                    id = 1,
+                    name = "Home Lounge",
+                    subtitle = null,
+                    description = null,
+                    slug = "home-lounge",
+                    isActive = true,
+                ),
+            ),
+        )
+        val viewModel = AuthViewModel(repository)
+
+        viewModel.onServerUrlChanged("https://bar.example.com")
+        viewModel.onEmailChanged("ryan@example.com")
+        viewModel.onPasswordChanged("secret-pass")
+        viewModel.checkServer()
+        runCurrent()
+        assertTrue(viewModel.uiState.value.isCheckingServer)
+
+        viewModel.signIn()
+        assertFalse(viewModel.uiState.value.isCheckingServer)
+        assertTrue(viewModel.uiState.value.isSigningIn)
+
+        advanceUntilIdle()
+        assertTrue(checkCancelled)
+        assertFalse(viewModel.uiState.value.isCheckingServer)
+        assertFalse(viewModel.uiState.value.isSigningIn)
+    }
+
+    @Test
+    fun `signIn with matching UnsupportedVersion serverStatus suppresses duplicate errorMessage`() = runTest(testDispatcher) {
+        val repository = FakeAuthRepository(
+            checkResult = ServerCheckResult.UnsupportedVersion(actual = "5.4.1", minimum = "6.0.0"),
+            signInResult = Result.failure(
+                IllegalStateException("Bar Assistant 5.4.1 is not supported. Minimum required version is v6.0.0."),
+            ),
+        )
+        val viewModel = AuthViewModel(repository)
+
+        viewModel.onServerUrlChanged("https://legacy.example.com")
+        viewModel.checkServer()
+        advanceUntilIdle()
+        assertIs<ServerCheckResult.UnsupportedVersion>(viewModel.uiState.value.serverStatus)
+
+        viewModel.onEmailChanged("ryan@example.com")
+        viewModel.onPasswordChanged("secret-pass")
+        viewModel.signIn()
+        advanceUntilIdle()
+
+        assertIs<ServerCheckResult.UnsupportedVersion>(viewModel.uiState.value.serverStatus)
+        assertNull(viewModel.uiState.value.errorMessage)
+    }
+
     private data class SignInCall(
         val serverUrl: String,
         val email: String,
@@ -197,13 +386,14 @@ class AuthViewModelTest {
     private class FakeAuthRepository(
         var checkResult: ServerCheckResult = ServerCheckResult.Error("Unconfigured"),
         var signInResult: Result<Bar> = Result.failure(IllegalStateException("Unconfigured")),
+        var onCheckServer: (suspend (String) -> ServerCheckResult)? = null,
     ) : AuthRepository {
         val checkedUrls = mutableListOf<String>()
         val signInCalls = mutableListOf<SignInCall>()
 
         override suspend fun checkServer(serverUrl: String): ServerCheckResult {
             checkedUrls += serverUrl
-            return checkResult
+            return onCheckServer?.invoke(serverUrl) ?: checkResult
         }
 
         override suspend fun signIn(serverUrl: String, email: String, password: String): Result<Bar> {

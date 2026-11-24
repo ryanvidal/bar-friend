@@ -72,14 +72,28 @@ class SettingsViewModel(
     )
 
     fun setPreferredUnit(unit: VolumeUnit) {
+        errorMessage.value = null
         viewModelScope.launch {
-            appPreferences.setPreferredUnit(unit)
+            runCatching {
+                appPreferences.setPreferredUnit(unit)
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                errorMessage.value = error.message?.takeIf { it.isNotBlank() }
+                    ?: "Could not save measurement unit."
+            }
         }
     }
 
     fun setThemeMode(mode: AppThemeMode) {
+        errorMessage.value = null
         viewModelScope.launch {
-            appPreferences.setThemeMode(mode)
+            runCatching {
+                appPreferences.setThemeMode(mode)
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                errorMessage.value = error.message?.takeIf { it.isNotBlank() }
+                    ?: "Could not save theme preference."
+            }
         }
     }
 
@@ -88,7 +102,9 @@ class SettingsViewModel(
         errorMessage.value = null
         viewModelScope.launch {
             try {
-                cocktailRepository.syncAll(force = true)
+                cocktailRepository.syncAll(force = true).onFailure { error ->
+                    errorMessage.value = error.message?.takeIf { it.isNotBlank() } ?: "Sync failed."
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {

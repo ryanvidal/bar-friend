@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -57,7 +58,6 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -73,6 +73,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -82,20 +83,24 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.ryanvidal.barfriend.core.data.SyncStatus
+import com.ryanvidal.barfriend.core.designsystem.BarFriendTheme
 import com.ryanvidal.barfriend.core.designsystem.EmptyStateCard
 import com.ryanvidal.barfriend.core.designsystem.InventoryStatusChip
+import com.ryanvidal.barfriend.core.designsystem.LocalBarFriendStatusColors
 import com.ryanvidal.barfriend.core.designsystem.SectionHeader
-import com.ryanvidal.barfriend.core.designsystem.StatusMissingTerracotta
+import com.ryanvidal.barfriend.core.model.AppThemeMode
 import com.ryanvidal.barfriend.core.model.BarCatalog
 import com.ryanvidal.barfriend.core.model.CocktailFilter
 import com.ryanvidal.barfriend.core.model.CocktailSort
 import com.ryanvidal.barfriend.core.model.CocktailSummary
+import com.ryanvidal.barfriend.core.model.CocktailTag
 import kotlin.math.abs
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CocktailsListScreen(
     viewModel: CocktailsListViewModel,
@@ -106,11 +111,6 @@ fun CocktailsListScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-    val focusManager = LocalFocusManager.current
-
-    var showFilterSheet by rememberSaveable { mutableStateOf(false) }
-    var showAddMenuSheet by rememberSaveable { mutableStateOf(false) }
-    var showImportUrlDialog by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(uiState.actionErrorMessage) {
         val message = uiState.actionErrorMessage
@@ -119,6 +119,47 @@ fun CocktailsListScreen(
             viewModel.dismissActionError()
         }
     }
+
+    CocktailsListContent(
+        uiState = uiState,
+        onQueryChanged = viewModel::onQueryChanged,
+        onToggleCanMake = viewModel::toggleCanMakeOnly,
+        onToggleFavorites = viewModel::toggleFavoritesOnly,
+        onUpdateFilter = viewModel::updateFilter,
+        onClearAdvancedFilters = viewModel::clearAdvancedFilters,
+        onClearAllFilters = viewModel::clearAllFilters,
+        onRefresh = viewModel::refresh,
+        onOpenCocktail = onOpenCocktail,
+        onToggleFavorite = viewModel::toggleFavorite,
+        onAddRecipe = onAddRecipe,
+        onImportFromUrl = onImportFromUrl,
+        snackbarHostState = snackbarHostState,
+        modifier = modifier,
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CocktailsListContent(
+    uiState: CocktailsListUiState,
+    onQueryChanged: (String) -> Unit,
+    onToggleCanMake: () -> Unit,
+    onToggleFavorites: () -> Unit,
+    onUpdateFilter: (CocktailFilter) -> Unit,
+    onClearAdvancedFilters: () -> Unit,
+    onClearAllFilters: () -> Unit,
+    onRefresh: () -> Unit,
+    onOpenCocktail: (Int) -> Unit,
+    onToggleFavorite: (Int) -> Unit,
+    onAddRecipe: () -> Unit,
+    onImportFromUrl: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+) {
+    val focusManager = LocalFocusManager.current
+    var showFilterSheet by rememberSaveable { mutableStateOf(false) }
+    var showAddMenuSheet by rememberSaveable { mutableStateOf(false) }
+    var showImportUrlDialog by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -141,12 +182,12 @@ fun CocktailsListScreen(
         ) {
             OutlinedTextField(
                 value = uiState.filter.query,
-                onValueChange = viewModel::onQueryChanged,
+                onValueChange = onQueryChanged,
                 placeholder = { Text("Search cocktails or ingredients") },
                 leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
                 trailingIcon = {
                     if (uiState.filter.query.isNotEmpty()) {
-                        IconButton(onClick = { viewModel.onQueryChanged("") }) {
+                        IconButton(onClick = { onQueryChanged("") }) {
                             Icon(Icons.Rounded.Close, contentDescription = "Clear search")
                         }
                     }
@@ -164,28 +205,30 @@ fun CocktailsListScreen(
 
             QuickFilterBar(
                 filter = uiState.filter,
-                onToggleCanMake = viewModel::toggleCanMakeOnly,
-                onToggleFavorites = viewModel::toggleFavoritesOnly,
+                onToggleCanMake = onToggleCanMake,
+                onToggleFavorites = onToggleFavorites,
                 onOpenFilters = { showFilterSheet = true },
             )
 
             uiState.syncStatus.errorMessage?.let { syncError ->
                 SyncErrorBanner(
                     message = syncError,
-                    onRetry = viewModel::refresh,
+                    onRetry = onRefresh,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                 )
             }
 
             PullToRefreshBox(
                 isRefreshing = uiState.syncStatus.isSyncing,
-                onRefresh = viewModel::refresh,
+                onRefresh = onRefresh,
                 modifier = Modifier
                     .fillMaxSize()
                     .weight(1f),
             ) {
                 when {
-                    uiState.cocktails.isEmpty() && uiState.syncStatus.isSyncing && !uiState.hasLoaded -> {
+                    uiState.cocktails.isEmpty() &&
+                        uiState.syncStatus.isSyncing &&
+                        uiState.syncStatus.lastSyncedEpochMillis == null -> {
                         Box(
                             modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center,
@@ -201,13 +244,13 @@ fun CocktailsListScreen(
                                 .verticalScroll(rememberScrollState())
                                 .padding(16.dp),
                         ) {
-                            if (uiState.filter != CocktailFilter()) {
+                            if (uiState.filter.hasActiveFilters) {
                                 EmptyStateCard(
                                     icon = Icons.Rounded.SearchOff,
                                     title = "No matching cocktails",
                                     subtitle = "Try adjusting your search or clearing active filters.",
                                     actionLabel = "Clear Filters",
-                                    onActionClick = viewModel::clearAllFilters,
+                                    onActionClick = onClearAllFilters,
                                 )
                             } else {
                                 EmptyStateCard(
@@ -240,8 +283,9 @@ fun CocktailsListScreen(
                             ) { cocktail ->
                                 CocktailListCard(
                                     cocktail = cocktail,
+                                    lastSyncedEpochMillis = uiState.syncStatus.lastSyncedEpochMillis,
                                     onClick = { onOpenCocktail(cocktail.id) },
-                                    onToggleFavorite = { viewModel.toggleFavorite(cocktail.id) },
+                                    onToggleFavorite = { onToggleFavorite(cocktail.id) },
                                 )
                             }
                         }
@@ -257,11 +301,11 @@ fun CocktailsListScreen(
             catalog = uiState.catalog,
             onDismiss = { showFilterSheet = false },
             onReset = {
-                viewModel.clearAdvancedFilters()
+                onClearAdvancedFilters()
                 showFilterSheet = false
             },
             onApply = { updated ->
-                viewModel.updateFilter(updated)
+                onUpdateFilter(updated)
                 showFilterSheet = false
             },
         )
@@ -438,9 +482,11 @@ private fun SyncErrorBanner(
 @Composable
 private fun CocktailListCard(
     cocktail: CocktailSummary,
+    lastSyncedEpochMillis: Long?,
     onClick: () -> Unit,
     onToggleFavorite: () -> Unit,
 ) {
+    val missingColor = LocalBarFriendStatusColors.current.missing
     ElevatedCard(
         onClick = onClick,
         shape = MaterialTheme.shapes.large,
@@ -455,7 +501,9 @@ private fun CocktailListCard(
                 .height(176.dp)
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh),
         ) {
-            var imageFailed by remember(cocktail.mainImageThumbUrl) { mutableStateOf(false) }
+            var imageFailed by remember(cocktail.mainImageThumbUrl, lastSyncedEpochMillis) {
+                mutableStateOf(false)
+            }
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
@@ -476,34 +524,37 @@ private fun CocktailListCard(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f),
+            IconButton(
+                onClick = onToggleFavorite,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(10.dp),
+                    .padding(4.dp)
+                    .size(48.dp),
             ) {
-                IconButton(
-                    onClick = onToggleFavorite,
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f),
                     modifier = Modifier.size(40.dp),
                 ) {
-                    Icon(
-                        imageVector = if (cocktail.isFavorite) {
-                            Icons.Rounded.Favorite
-                        } else {
-                            Icons.Rounded.FavoriteBorder
-                        },
-                        contentDescription = if (cocktail.isFavorite) {
-                            "Remove from favorites"
-                        } else {
-                            "Add to favorites"
-                        },
-                        tint = if (cocktail.isFavorite) {
-                            MaterialTheme.colorScheme.tertiary
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                    )
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = if (cocktail.isFavorite) {
+                                Icons.Rounded.Favorite
+                            } else {
+                                Icons.Rounded.FavoriteBorder
+                            },
+                            contentDescription = if (cocktail.isFavorite) {
+                                "Remove from favorites"
+                            } else {
+                                "Add to favorites"
+                            },
+                            tint = if (cocktail.isFavorite) {
+                                MaterialTheme.colorScheme.tertiary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -523,9 +574,9 @@ private fun CocktailListCard(
             )
 
             val metaParts = buildList {
-                cocktail.abv?.let { add(formatAbv(it)) }
-                cocktail.glassName?.takeIf { it.isNotBlank() }?.let { add(it) }
-                cocktail.methodName?.takeIf { it.isNotBlank() }?.let { add(it) }
+                cocktail.abv?.let(::formatAbv)?.takeIf { it.isNotEmpty() }?.let(::add)
+                cocktail.glassName?.takeIf { it.isNotBlank() }?.let(::add)
+                cocktail.methodName?.takeIf { it.isNotBlank() }?.let(::add)
             }
             if (metaParts.isNotEmpty()) {
                 Text(
@@ -571,7 +622,7 @@ private fun CocktailListCard(
                     Text(
                         text = "Missing 1: ${cocktail.missingIngredientNames.first()}",
                         style = MaterialTheme.typography.bodySmall,
-                        color = StatusMissingTerracotta,
+                        color = missingColor,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
@@ -595,6 +646,11 @@ private val ABV_PRESETS = listOf(
     AbvPreset("Strong (25%+)", 25.0, null),
 )
 
+private val TagIdSetSaver = listSaver<Set<Int>, Int>(
+    save = { it.toList() },
+    restore = { it.toSet() },
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AdvancedFiltersSheet(
@@ -604,16 +660,29 @@ private fun AdvancedFiltersSheet(
     onReset: () -> Unit,
     onApply: (CocktailFilter) -> Unit,
 ) {
-    var selectedSort by remember(currentFilter) { mutableStateOf(currentFilter.sort) }
-    var selectedTagIds by remember(currentFilter) { mutableStateOf(currentFilter.tagIds) }
-    var selectedGlassId by remember(currentFilter) { mutableStateOf(currentFilter.glassId) }
-    var selectedMethodId by remember(currentFilter) { mutableStateOf(currentFilter.methodId) }
-    var abvMinText by remember(currentFilter) {
+    var selectedSortName by rememberSaveable(currentFilter) {
+        mutableStateOf(currentFilter.sort.name)
+    }
+    var selectedTagIds by rememberSaveable(currentFilter, stateSaver = TagIdSetSaver) {
+        mutableStateOf(currentFilter.tagIds)
+    }
+    var selectedGlassId by rememberSaveable(currentFilter) {
+        mutableStateOf(currentFilter.glassId)
+    }
+    var selectedMethodId by rememberSaveable(currentFilter) {
+        mutableStateOf(currentFilter.methodId)
+    }
+    var abvMinText by rememberSaveable(currentFilter) {
         mutableStateOf(currentFilter.abvMin?.let(::formatNumericInput).orEmpty())
     }
-    var abvMaxText by remember(currentFilter) {
+    var abvMaxText by rememberSaveable(currentFilter) {
         mutableStateOf(currentFilter.abvMax?.let(::formatNumericInput).orEmpty())
     }
+    var abvValidationError by rememberSaveable(currentFilter) {
+        mutableStateOf<String?>(null)
+    }
+
+    val selectedSort = CocktailSort.entries.firstOrNull { it.name == selectedSortName } ?: CocktailSort.NAME_ASC
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -622,6 +691,7 @@ private fun AdvancedFiltersSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .imePadding()
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -637,12 +707,13 @@ private fun AdvancedFiltersSheet(
                 )
                 TextButton(
                     onClick = {
-                        selectedSort = CocktailSort.NAME_ASC
+                        selectedSortName = CocktailSort.NAME_ASC.name
                         selectedTagIds = emptySet()
                         selectedGlassId = null
                         selectedMethodId = null
                         abvMinText = ""
                         abvMaxText = ""
+                        abvValidationError = null
                     },
                 ) {
                     Text("Clear Draft")
@@ -665,7 +736,7 @@ private fun AdvancedFiltersSheet(
                         CocktailSort.entries.forEach { sortOption ->
                             FilterChip(
                                 selected = selectedSort == sortOption,
-                                onClick = { selectedSort = sortOption },
+                                onClick = { selectedSortName = sortOption.name },
                                 label = { Text(sortOption.label) },
                             )
                         }
@@ -674,8 +745,8 @@ private fun AdvancedFiltersSheet(
 
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SectionHeader(title = "ABV Range")
-                    val currentMin = abvMinText.trim().toDoubleOrNull()
-                    val currentMax = abvMaxText.trim().toDoubleOrNull()
+                    val currentMin = abvMinText.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
+                    val currentMax = abvMaxText.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -693,6 +764,7 @@ private fun AdvancedFiltersSheet(
                                         abvMinText = preset.min?.let(::formatNumericInput).orEmpty()
                                         abvMaxText = preset.max?.let(::formatNumericInput).orEmpty()
                                     }
+                                    abvValidationError = null
                                 },
                                 label = { Text(preset.label) },
                             )
@@ -704,19 +776,34 @@ private fun AdvancedFiltersSheet(
                     ) {
                         OutlinedTextField(
                             value = abvMinText,
-                            onValueChange = { abvMinText = it },
+                            onValueChange = {
+                                abvMinText = it
+                                abvValidationError = null
+                            },
                             label = { Text("Min %") },
+                            isError = abvValidationError != null,
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.weight(1f),
                         )
                         OutlinedTextField(
                             value = abvMaxText,
-                            onValueChange = { abvMaxText = it },
+                            onValueChange = {
+                                abvMaxText = it
+                                abvValidationError = null
+                            },
                             label = { Text("Max %") },
+                            isError = abvValidationError != null,
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.weight(1f),
+                        )
+                    }
+                    abvValidationError?.let { error ->
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
                         )
                     }
                 }
@@ -779,16 +866,21 @@ private fun AdvancedFiltersSheet(
                 }
                 Button(
                     onClick = {
-                        onApply(
-                            currentFilter.copy(
-                                sort = selectedSort,
-                                tagIds = selectedTagIds,
-                                glassId = selectedGlassId,
-                                methodId = selectedMethodId,
-                                abvMin = abvMinText.trim().toDoubleOrNull(),
-                                abvMax = abvMaxText.trim().toDoubleOrNull(),
-                            ),
-                        )
+                        val validation = validateAbvRange(abvMinText, abvMaxText)
+                        if (validation.error != null) {
+                            abvValidationError = validation.error
+                        } else {
+                            onApply(
+                                currentFilter.copy(
+                                    sort = selectedSort,
+                                    tagIds = selectedTagIds,
+                                    glassId = selectedGlassId,
+                                    methodId = selectedMethodId,
+                                    abvMin = validation.min,
+                                    abvMax = validation.max,
+                                ),
+                            )
+                        }
                     },
                     modifier = Modifier.weight(1f),
                 ) {
@@ -797,6 +889,36 @@ private fun AdvancedFiltersSheet(
             }
         }
     }
+}
+
+private data class AbvValidationResult(
+    val min: Double? = null,
+    val max: Double? = null,
+    val error: String? = null,
+)
+
+private fun validateAbvRange(minText: String, maxText: String): AbvValidationResult {
+    val trimmedMin = minText.trim()
+    val parsedMin = if (trimmedMin.isEmpty()) {
+        null
+    } else {
+        trimmedMin.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
+            ?: return AbvValidationResult(error = "Enter a valid non-negative Min ABV.")
+    }
+
+    val trimmedMax = maxText.trim()
+    val parsedMax = if (trimmedMax.isEmpty()) {
+        null
+    } else {
+        trimmedMax.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
+            ?: return AbvValidationResult(error = "Enter a valid non-negative Max ABV.")
+    }
+
+    if (parsedMin != null && parsedMax != null && parsedMin > parsedMax) {
+        return AbvValidationResult(error = "Min ABV cannot exceed Max ABV.")
+    }
+
+    return AbvValidationResult(min = parsedMin, max = parsedMax)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -903,4 +1025,91 @@ private fun matchesNullableDouble(a: Double?, b: Double?): Boolean {
     if (a == null && b == null) return true
     if (a == null || b == null) return false
     return abs(a - b) < 1e-4
+}
+
+private fun previewListCocktails(): List<CocktailSummary> = listOf(
+    CocktailSummary(
+        id = 1,
+        slug = "negroni",
+        name = "Negroni",
+        shortDescription = "Equal parts gin, Campari, and sweet vermouth.",
+        abv = 24.0,
+        glassName = "Rocks",
+        methodName = "Stir",
+        mainImageThumbUrl = null,
+        isFavorite = true,
+        inBarShelf = false,
+        missingIngredientsCount = 1,
+        missingIngredientNames = listOf("Sweet Vermouth"),
+        tags = listOf(CocktailTag(30, "Classic"), CocktailTag(31, "Bitter")),
+    ),
+    CocktailSummary(
+        id = 2,
+        slug = "gimlet",
+        name = "Gimlet",
+        shortDescription = "Crisp gin and fresh lime.",
+        abv = 21.0,
+        glassName = "Coupe",
+        methodName = "Shake",
+        mainImageThumbUrl = null,
+        isFavorite = false,
+        inBarShelf = true,
+        missingIngredientsCount = 0,
+        missingIngredientNames = emptyList(),
+        tags = listOf(CocktailTag(30, "Classic"), CocktailTag(32, "Citrus")),
+    ),
+)
+
+@Preview
+@Composable
+private fun CocktailsListPopulatedDarkPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.DARK) {
+        CocktailsListPreviewHost(cocktails = previewListCocktails())
+    }
+}
+
+@Preview
+@Composable
+private fun CocktailsListPopulatedLightPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.LIGHT) {
+        CocktailsListPreviewHost(cocktails = previewListCocktails())
+    }
+}
+
+@Preview
+@Composable
+private fun CocktailsListEmptyDarkPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.DARK) {
+        CocktailsListPreviewHost(cocktails = emptyList())
+    }
+}
+
+@Preview
+@Composable
+private fun CocktailsListEmptyLightPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.LIGHT) {
+        CocktailsListPreviewHost(cocktails = emptyList())
+    }
+}
+
+@Composable
+private fun CocktailsListPreviewHost(cocktails: List<CocktailSummary>) {
+    CocktailsListContent(
+        uiState = CocktailsListUiState(
+            cocktails = cocktails,
+            syncStatus = SyncStatus(lastSyncedEpochMillis = 1_700_000_000_000L),
+            hasLoaded = true,
+        ),
+        onQueryChanged = {},
+        onToggleCanMake = {},
+        onToggleFavorites = {},
+        onUpdateFilter = {},
+        onClearAdvancedFilters = {},
+        onClearAllFilters = {},
+        onRefresh = {},
+        onOpenCocktail = {},
+        onToggleFavorite = {},
+        onAddRecipe = {},
+        onImportFromUrl = {},
+    )
 }

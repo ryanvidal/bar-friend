@@ -5,6 +5,7 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MotionScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import com.ryanvidal.barfriend.core.model.AppThemeMode
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -18,12 +19,15 @@ fun BarFriendTheme(
         AppThemeMode.LIGHT -> false
         AppThemeMode.SYSTEM -> isSystemInDarkTheme()
     }
+    val statusColors = if (darkTheme) BarFriendDarkStatusColors else BarFriendLightStatusColors
 
-    MaterialExpressiveTheme(
-        colorScheme = if (darkTheme) BarFriendDarkColorScheme else BarFriendLightColorScheme,
-        shapes = BarFriendShapes,
-        typography = BarFriendTypography,
-        motionScheme = MotionScheme.expressive(),
-        content = content,
-    )
+    CompositionLocalProvider(LocalBarFriendStatusColors provides statusColors) {
+        MaterialExpressiveTheme(
+            colorScheme = if (darkTheme) BarFriendDarkColorScheme else BarFriendLightColorScheme,
+            shapes = BarFriendShapes,
+            typography = BarFriendTypography,
+            motionScheme = MotionScheme.expressive(),
+            content = content,
+        )
+    }
 }

@@ -2,7 +2,6 @@ package com.ryanvidal.barfriend.feature.cocktails
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -64,25 +64,32 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.ryanvidal.barfriend.core.designsystem.BarFriendTheme
 import com.ryanvidal.barfriend.core.designsystem.EmptyStateCard
 import com.ryanvidal.barfriend.core.designsystem.InventoryStatusChip
+import com.ryanvidal.barfriend.core.designsystem.LocalBarFriendStatusColors
 import com.ryanvidal.barfriend.core.designsystem.SectionHeader
-import com.ryanvidal.barfriend.core.designsystem.StatusMissingTerracotta
-import com.ryanvidal.barfriend.core.designsystem.StatusReadyGreen
-import com.ryanvidal.barfriend.core.designsystem.StatusSubstituteAmber
+import com.ryanvidal.barfriend.core.model.AppThemeMode
 import com.ryanvidal.barfriend.core.model.CocktailDetail
 import com.ryanvidal.barfriend.core.model.CocktailImage
 import com.ryanvidal.barfriend.core.model.CocktailIngredient
+import com.ryanvidal.barfriend.core.model.CocktailMethod
+import com.ryanvidal.barfriend.core.model.CocktailTag
+import com.ryanvidal.barfriend.core.model.Glass
+import com.ryanvidal.barfriend.core.model.IngredientSubstitute
 import com.ryanvidal.barfriend.core.model.UnitFormatter
 import com.ryanvidal.barfriend.core.model.VolumeUnit
 import com.ryanvidal.barfriend.core.platform.KeepScreenOnEffect
+import kotlin.math.abs
 
 private val SCALE_PRESETS = listOf(
     0.5 to "0.5×",
@@ -91,7 +98,6 @@ private val SCALE_PRESETS = listOf(
     4.0 to "4×",
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CocktailDetailScreen(
     viewModel: CocktailDetailViewModel,
@@ -101,17 +107,17 @@ fun CocktailDetailScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-    var showDeleteConfirmation by rememberSaveable { mutableStateOf(false) }
 
     KeepScreenOnEffect(enabled = uiState.isMakeMode)
 
     LaunchedEffect(uiState.deleted) {
         if (uiState.deleted) {
+            viewModel.consumeDeletedEvent()
             onBack()
         }
     }
 
-    LaunchedEffect(uiState.errorMessage) {
+    LaunchedEffect(uiState.errorMessage, uiState.cocktail != null) {
         val message = uiState.errorMessage
         if (message != null && uiState.cocktail != null) {
             snackbarHostState.showSnackbar(message)
@@ -119,6 +125,39 @@ fun CocktailDetailScreen(
         }
     }
 
+    CocktailDetailContent(
+        uiState = uiState,
+        onBack = onBack,
+        onEditCocktail = onEditCocktail,
+        onRefresh = viewModel::refresh,
+        onToggleFavorite = viewModel::toggleFavorite,
+        onDeleteConfirmed = viewModel::deleteCocktail,
+        onToggleMakeMode = viewModel::toggleMakeMode,
+        onSelectScale = viewModel::setScaleFactor,
+        onSelectUnit = viewModel::setUnit,
+        onToggleStepChecked = viewModel::toggleStepChecked,
+        snackbarHostState = snackbarHostState,
+        modifier = modifier,
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CocktailDetailContent(
+    uiState: CocktailDetailUiState,
+    onBack: () -> Unit,
+    onEditCocktail: (Int) -> Unit,
+    onRefresh: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onDeleteConfirmed: () -> Unit,
+    onToggleMakeMode: () -> Unit,
+    onSelectScale: (Double) -> Unit,
+    onSelectUnit: (VolumeUnit) -> Unit,
+    onToggleStepChecked: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+) {
+    var showDeleteConfirmation by rememberSaveable { mutableStateOf(false) }
     val cocktail = uiState.cocktail
 
     Scaffold(
@@ -141,8 +180,8 @@ fun CocktailDetailScreen(
                 actions = {
                     if (cocktail != null) {
                         IconButton(
-                            onClick = viewModel::toggleFavorite,
-                            enabled = !uiState.isDeleting,
+                            onClick = onToggleFavorite,
+                            enabled = !uiState.isDeleting && !uiState.isTogglingFavorite,
                         ) {
                             Icon(
                                 imageVector = if (cocktail.isFavorite) {
@@ -192,19 +231,24 @@ fun CocktailDetailScreen(
             }
 
             cocktail == null -> {
-                Box(
+                Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
                         .padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     EmptyStateCard(
                         icon = Icons.Rounded.LocalBar,
                         title = "Recipe unavailable",
                         subtitle = uiState.errorMessage ?: "Connect to your Bar Assistant server to load this recipe.",
-                        actionLabel = "Retry",
-                        onActionClick = viewModel::refresh,
+                        actionLabel = if (uiState.isRefreshing) null else "Retry",
+                        onActionClick = onRefresh,
                     )
+                    if (uiState.isRefreshing) {
+                        CircularProgressIndicator()
+                    }
                 }
             }
 
@@ -214,6 +258,9 @@ fun CocktailDetailScreen(
                 }
                 val steps = remember(cocktail.instructions) {
                     parseInstructionSteps(cocktail.instructions)
+                }
+                val completedStepsCount = remember(uiState.checkedSteps, steps.size) {
+                    uiState.checkedSteps.count { it in steps.indices }
                 }
 
                 LazyColumn(
@@ -226,7 +273,7 @@ fun CocktailDetailScreen(
                     item(key = "make_mode_banner") {
                         MakeModeBanner(
                             isMakeMode = uiState.isMakeMode,
-                            onToggle = viewModel::toggleMakeMode,
+                            onToggle = onToggleMakeMode,
                         )
                     }
 
@@ -269,8 +316,8 @@ fun CocktailDetailScreen(
                         ScaleAndUnitControls(
                             scaleFactor = uiState.scaleFactor,
                             selectedUnit = uiState.selectedUnit,
-                            onSelectScale = viewModel::setScaleFactor,
-                            onSelectUnit = viewModel::setUnit,
+                            onSelectScale = onSelectScale,
+                            onSelectUnit = onSelectUnit,
                         )
                     }
 
@@ -309,7 +356,7 @@ fun CocktailDetailScreen(
                             trailing = if (uiState.isMakeMode && steps.isNotEmpty()) {
                                 {
                                     Text(
-                                        text = "${uiState.checkedSteps.size}/${steps.size} done",
+                                        text = "$completedStepsCount/${steps.size} done",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.primary,
                                     )
@@ -341,7 +388,7 @@ fun CocktailDetailScreen(
                                 text = stepText,
                                 isMakeMode = uiState.isMakeMode,
                                 isChecked = index in uiState.checkedSteps,
-                                onToggleChecked = { viewModel.toggleStepChecked(index) },
+                                onToggleChecked = { onToggleStepChecked(index) },
                             )
                         }
                     }
@@ -365,7 +412,7 @@ fun CocktailDetailScreen(
                 TextButton(
                     onClick = {
                         showDeleteConfirmation = false
-                        viewModel.deleteCocktail()
+                        onDeleteConfirmed()
                     },
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,
@@ -403,12 +450,18 @@ private fun MakeModeBanner(
                 MaterialTheme.colorScheme.outlineVariant
             },
         ),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.large),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onToggle)
+                .toggleable(
+                    value = isMakeMode,
+                    role = Role.Switch,
+                    onValueChange = { onToggle() },
+                )
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -448,7 +501,7 @@ private fun MakeModeBanner(
             }
             Switch(
                 checked = isMakeMode,
-                onCheckedChange = { onToggle() },
+                onCheckedChange = null,
             )
         }
     }
@@ -484,13 +537,13 @@ private fun HeroImageCarousel(
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         HorizontalPager(
             state = pagerState,
+            key = { index -> sortedImages.getOrNull(index)?.id ?: index },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(248.dp)
                 .clip(MaterialTheme.shapes.large),
         ) { page ->
-            val image = sortedImages[page]
-            var loadFailed by remember(image.url) { mutableStateOf(false) }
+            val image = sortedImages.getOrNull(page) ?: return@HorizontalPager
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -503,12 +556,11 @@ private fun HeroImageCarousel(
                     tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
                     modifier = Modifier.size(48.dp),
                 )
-                if (!loadFailed) {
+                if (image.url.isNotBlank()) {
                     AsyncImage(
                         model = image.url,
                         contentDescription = cocktailName,
                         contentScale = ContentScale.Crop,
-                        onError = { loadFailed = true },
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -573,11 +625,11 @@ private fun CocktailHeaderSection(cocktail: CocktailDetail) {
         )
 
         val metadataItems = buildList {
-            cocktail.abv?.let { add(formatAbv(it)) }
-            cocktail.glass?.name?.let { add(it) }
-            cocktail.method?.name?.let { add(it) }
+            cocktail.abv?.let(::formatAbv)?.takeIf { it.isNotEmpty() }?.let(::add)
+            cocktail.glass?.name?.let(::add)
+            cocktail.method?.name?.let(::add)
             cocktail.year?.let { add(it.toString()) }
-            cocktail.author?.takeIf { it.isNotBlank() }?.let { add(it) }
+            cocktail.author?.takeIf { it.isNotBlank() }?.let(::add)
         }
         if (metadataItems.isNotEmpty()) {
             FlowRow(
@@ -675,20 +727,19 @@ private fun ScaleAndUnitControls(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     text = "Servings",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     SCALE_PRESETS.forEach { (factor, label) ->
                         FilterChip(
-                            selected = kotlin.math.abs(scaleFactor - factor) < 1e-4,
+                            selected = abs(scaleFactor - factor) < 1e-4,
                             onClick = { onSelectScale(factor) },
                             label = { Text(label) },
                         )
@@ -730,6 +781,7 @@ private fun DetailIngredientRow(
     scaleFactor: Double,
     isMakeMode: Boolean,
 ) {
+    val statusColors = LocalBarFriendStatusColors.current
     val formattedAmount = UnitFormatter.formatIngredientAmount(
         amount = ingredient.amount,
         amountMax = ingredient.amountMax,
@@ -742,9 +794,9 @@ private fun DetailIngredientRow(
         (ingredient.inBarShelfAsSubstitute || ingredient.inBarShelfAsVariant || ingredient.inBarShelfAsComplex)
 
     val statusColor = when {
-        ingredient.inBarShelf -> StatusReadyGreen
-        hasSubstitute -> StatusSubstituteAmber
-        else -> StatusMissingTerracotta
+        ingredient.inBarShelf -> statusColors.ready
+        hasSubstitute -> statusColors.substitute
+        else -> statusColors.missing
     }
     val statusIcon = when {
         ingredient.inBarShelf -> Icons.Rounded.CheckCircle
@@ -854,6 +906,7 @@ private fun InstructionStepCard(
     isChecked: Boolean,
     onToggleChecked: () -> Unit,
 ) {
+    val statusColors = LocalBarFriendStatusColors.current
     val containerColor = when {
         isMakeMode && isChecked -> MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.6f)
         isMakeMode -> MaterialTheme.colorScheme.surfaceContainer
@@ -866,7 +919,7 @@ private fun InstructionStepCard(
         border = BorderStroke(
             width = 1.dp,
             color = if (isMakeMode && isChecked) {
-                StatusReadyGreen.copy(alpha = 0.5f)
+                statusColors.ready.copy(alpha = 0.5f)
             } else {
                 MaterialTheme.colorScheme.outlineVariant
             },
@@ -874,7 +927,17 @@ private fun InstructionStepCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.medium)
-            .then(if (isMakeMode) Modifier.clickable(onClick = onToggleChecked) else Modifier),
+            .then(
+                if (isMakeMode) {
+                    Modifier.toggleable(
+                        value = isChecked,
+                        role = Role.Checkbox,
+                        onValueChange = { onToggleChecked() },
+                    )
+                } else {
+                    Modifier
+                },
+            ),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = if (isMakeMode) 16.dp else 12.dp),
@@ -884,7 +947,7 @@ private fun InstructionStepCard(
             Surface(
                 shape = CircleShape,
                 color = when {
-                    isMakeMode && isChecked -> StatusReadyGreen
+                    isMakeMode && isChecked -> statusColors.ready
                     isMakeMode -> MaterialTheme.colorScheme.primary
                     else -> MaterialTheme.colorScheme.primaryContainer
                 },
@@ -935,4 +998,126 @@ private fun InstructionStepCard(
             )
         }
     }
+}
+
+private fun previewCocktailDetail(): CocktailDetail = CocktailDetail(
+    id = 1,
+    slug = "negroni",
+    name = "Negroni",
+    shortDescription = "Equal parts bitter Italian aperitivo.",
+    instructions = "1. Add ingredients to a mixing glass with ice.\n2. Stir until chilled.\n3. Strain over a large ice cube.",
+    garnish = "Expressed orange peel",
+    description = "Equal parts gin, Campari, and sweet vermouth.",
+    source = "IBA Official",
+    abv = 24.0,
+    glass = Glass(10, "Rocks", 250.0, "ml"),
+    method = CocktailMethod(20, "Stir", 20),
+    images = emptyList(),
+    tags = listOf(CocktailTag(30, "Classic"), CocktailTag(31, "Bitter")),
+    utensils = emptyList(),
+    ingredients = listOf(
+        CocktailIngredient(
+            id = 1,
+            ingredientId = 1,
+            ingredientSlug = "gin",
+            name = "London Dry Gin",
+            sort = 1,
+            amount = 30.0,
+            amountMax = null,
+            units = "ml",
+            optional = false,
+            note = null,
+            inBarShelf = true,
+            substitutes = emptyList(),
+        ),
+        CocktailIngredient(
+            id = 2,
+            ingredientId = 2,
+            ingredientSlug = "campari",
+            name = "Campari",
+            sort = 2,
+            amount = 30.0,
+            amountMax = null,
+            units = "ml",
+            optional = false,
+            note = null,
+            inBarShelf = false,
+            inBarShelfAsSubstitute = true,
+            substitutes = listOf(
+                IngredientSubstitute(id = 9, slug = "aperitivo", name = "Aperitivo Rosso", inBarShelf = true),
+            ),
+        ),
+        CocktailIngredient(
+            id = 3,
+            ingredientId = 3,
+            ingredientSlug = "sweet-vermouth",
+            name = "Sweet Vermouth",
+            sort = 3,
+            amount = 30.0,
+            amountMax = null,
+            units = "ml",
+            optional = false,
+            note = null,
+            inBarShelf = false,
+            substitutes = emptyList(),
+        ),
+    ),
+    isFavorite = true,
+    inBarShelf = false,
+    missingIngredientsCount = 1,
+)
+
+@Preview
+@Composable
+private fun CocktailDetailStandardDarkPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.DARK) {
+        CocktailDetailPreviewHost(isMakeMode = false)
+    }
+}
+
+@Preview
+@Composable
+private fun CocktailDetailStandardLightPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.LIGHT) {
+        CocktailDetailPreviewHost(isMakeMode = false)
+    }
+}
+
+@Preview
+@Composable
+private fun CocktailDetailMakeModeDarkPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.DARK) {
+        CocktailDetailPreviewHost(isMakeMode = true)
+    }
+}
+
+@Preview
+@Composable
+private fun CocktailDetailMakeModeLightPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.LIGHT) {
+        CocktailDetailPreviewHost(isMakeMode = true)
+    }
+}
+
+@Composable
+private fun CocktailDetailPreviewHost(isMakeMode: Boolean) {
+    CocktailDetailContent(
+        uiState = CocktailDetailUiState(
+            cocktail = previewCocktailDetail(),
+            isLoading = false,
+            selectedUnit = VolumeUnit.OZ,
+            scaleFactor = 1.0,
+            isMakeMode = isMakeMode,
+            checkedSteps = if (isMakeMode) setOf(0) else emptySet(),
+        ),
+        onBack = {},
+        onEditCocktail = {},
+        onRefresh = {},
+        onToggleFavorite = {},
+        onDeleteConfirmed = {},
+        onToggleMakeMode = {},
+        onSelectScale = {},
+        onSelectUnit = {},
+        onToggleStepChecked = {},
+    )
 }

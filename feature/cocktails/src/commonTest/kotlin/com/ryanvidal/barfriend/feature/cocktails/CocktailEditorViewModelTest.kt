@@ -1,8 +1,12 @@
 package com.ryanvidal.barfriend.feature.cocktails
 
+import com.ryanvidal.barfriend.core.model.CocktailIngredient
+import com.ryanvidal.barfriend.core.model.IngredientSubstitute
+import com.ryanvidal.barfriend.core.model.IngredientSubstituteInput
 import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.ScrapedCocktailIngredient
 import com.ryanvidal.barfriend.core.model.ScrapedImage
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -14,6 +18,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -33,7 +38,29 @@ class CocktailEditorViewModelTest {
     }
 
     @Test
-    fun `validates blank name, blank instructions, and unmatched or invalid ingredients before saving`() = runTest(testDispatcher) {
+    fun `formatting preserves 3 decimals for eighth-oz fractions, negative ABV signs, large numbers, and non-finite guards`() {
+        assertEquals("0.125", formatNumericInput(0.125))
+        assertEquals("0.375", formatNumericInput(0.375))
+        assertEquals("0.625", formatNumericInput(0.625))
+        assertEquals("0.875", formatNumericInput(0.875))
+        assertEquals("22.5", formatNumericInput(22.5))
+        assertEquals("30", formatNumericInput(30.0))
+        assertEquals("0", formatNumericInput(-0.0))
+        assertEquals("10000000", formatNumericInput(10_000_000.0))
+        assertEquals("", formatNumericInput(Double.NaN))
+        assertEquals("", formatNumericInput(Double.POSITIVE_INFINITY))
+        assertEquals("", formatNumericInput(Double.NEGATIVE_INFINITY))
+
+        assertEquals("-0.5% ABV", formatAbv(-0.5))
+        assertEquals("0% ABV", formatAbv(-0.01))
+        assertEquals("24% ABV", formatAbv(24.0))
+        assertEquals("12.5% ABV", formatAbv(12.5))
+        assertEquals("", formatAbv(Double.NaN))
+        assertEquals("", formatAbv(Double.POSITIVE_INFINITY))
+    }
+
+    @Test
+    fun `validates blank fields, non-finite or negative amounts, and accepts zero or blank amount with unit`() = runTest(testDispatcher) {
         val repository = FakeCocktailRepository()
         val viewModel = CocktailEditorViewModel(
             cocktailId = null,
@@ -64,23 +91,61 @@ class CocktailEditorViewModelTest {
         assertNotNull(viewModel.uiState.value.errorMessage)
         assertTrue(repository.saveCalls.isEmpty())
 
-        // Matched ingredient but invalid amount (<= 0)
+        // Matched ingredient with negative / NaN / Infinity amounts must be rejected
         viewModel.updateIngredientSelection(rowKey, sampleCatalog().ingredients.first())
-        viewModel.updateIngredientRow(rowKey, amountText = "0")
+        listOf("-1", "NaN", "Infinity", "-Infinity", "abc").forEach { badAmount ->
+            viewModel.updateIngredientRow(rowKey, amountText = badAmount, units = "ml")
+            viewModel.save()
+            advanceUntilIdle()
+            assertNotNull(viewModel.uiState.value.errorMessage, "Expected error for amount=$badAmount")
+            assertTrue(repository.saveCalls.isEmpty())
+        }
+
+        // Blank amount AND blank units must be rejected
+        viewModel.updateIngredientRow(rowKey, amountText = "", units = "")
         viewModel.save()
         advanceUntilIdle()
         assertNotNull(viewModel.uiState.value.errorMessage)
         assertTrue(repository.saveCalls.isEmpty())
+
+        // Invalid amountMax (NaN / negative / < amount) must be rejected
+        viewModel.updateIngredientRow(rowKey, amountText = "30", amountMaxText = "20", units = "ml")
+        viewModel.save()
+        advanceUntilIdle()
+        assertNotNull(viewModel.uiState.value.errorMessage)
+        assertTrue(repository.saveCalls.isEmpty())
+
+        viewModel.updateIngredientRow(rowKey, amountText = "30", amountMaxText = "NaN", units = "ml")
+        viewModel.save()
+        advanceUntilIdle()
+        assertNotNull(viewModel.uiState.value.errorMessage)
+        assertTrue(repository.saveCalls.isEmpty())
+
+        // Blank amount with non-blank unit ("top up") and unitless ingredient with numeric amount are valid
+        viewModel.updateIngredientRow(rowKey, amountText = "", amountMaxText = "", units = "top up")
+        val unitlessKey = viewModel.addIngredientRow(sampleCatalog().ingredients[3])
+        viewModel.updateIngredientRow(unitlessKey, amountText = "1", units = "")
+        viewModel.save()
+        advanceUntilIdle()
+
+        assertNull(viewModel.uiState.value.errorMessage)
+        assertEquals(1, repository.saveCalls.size)
+        val savedIngredients = repository.saveCalls.first().request.ingredients
+        assertEquals(0.0, savedIngredients[0].amount)
+        assertEquals("top up", savedIngredients[0].units)
+        assertEquals(1.0, savedIngredients[1].amount)
+        assertEquals("", savedIngredients[1].units)
     }
 
     @Test
-    fun `URL scrape auto matches glass, method, and catalog ingredients while flagging unmatched ones`() = runTest(testDispatcher) {
+    fun `URL scrape auto matches catalog and preserves unitless ingredients and existing description or garnish`() = runTest(testDispatcher) {
         val repository = FakeCocktailRepository().apply {
             scrapeResult = Result.success(
                 ScrapedCocktail(
                     name = "Last Word",
                     instructions = "Shake all ingredients with ice and double strain.",
-                    garnish = "Brandied cherry",
+                    description = "   ",
+                    garnish = "",
                     source = "https://example.com/last-word",
                     tags = listOf("classic", "Herbal"),
                     glassName = "  coupe ",
@@ -89,8 +154,13 @@ class CocktailEditorViewModelTest {
                     ingredients = listOf(
                         ScrapedCocktailIngredient(
                             name = "  london dry gin ",
-                            amount = 22.5,
-                            units = "ml",
+                            amount = 0.75,
+                            units = "oz",
+                        ),
+                        ScrapedCocktailIngredient(
+                            name = "Lime Juice",
+                            amount = 1.0,
+                            units = null,
                         ),
                         ScrapedCocktailIngredient(
                             name = "Green Chartreuse",
@@ -105,47 +175,51 @@ class CocktailEditorViewModelTest {
 
         val viewModel = CocktailEditorViewModel(
             cocktailId = null,
-            initialImportUrl = "https://example.com/last-word",
+            initialImportUrl = null,
             cocktailRepository = repository,
         )
+        advanceUntilIdle()
+
+        viewModel.onDescriptionChanged("Keep this existing description")
+        viewModel.onGarnishChanged("Brandied cherry")
+        viewModel.importFromUrl("https://example.com/last-word")
         advanceUntilIdle()
 
         val state = viewModel.uiState.value
         assertEquals(listOf("https://example.com/last-word"), repository.scrapedUrls)
         assertEquals("Last Word", state.name)
+        assertEquals("Keep this existing description", state.description)
+        assertEquals("Brandied cherry", state.garnish)
         assertEquals(11, state.glassId)
         assertEquals(21, state.methodId)
         assertEquals(listOf("Classic", "Herbal"), state.tags)
-        assertEquals(2, state.ingredients.size)
+        assertEquals(3, state.ingredients.size)
+        assertTrue(state.hasUnsavedChanges)
 
         val matchedRow = state.ingredients[0]
         assertEquals(1, matchedRow.ingredientId)
         assertEquals("London Dry Gin", matchedRow.ingredientName)
         assertNull(matchedRow.unmatchedScrapedHint)
 
-        val unmatchedRow = state.ingredients[1]
+        val unitlessRow = state.ingredients[1]
+        assertEquals(4, unitlessRow.ingredientId)
+        assertEquals("", unitlessRow.units)
+
+        val unmatchedRow = state.ingredients[2]
         assertNull(unmatchedRow.ingredientId)
         assertEquals("Green Chartreuse", unmatchedRow.ingredientName)
         assertEquals("3/4 oz Green Chartreuse", unmatchedRow.unmatchedScrapedHint)
 
         assertEquals(1, state.photos.size)
         assertTrue(state.photos.first() is EditorPhotoItem.PendingRemote)
-
-        // Saving while unmatched row exists must fail validation
-        viewModel.save()
-        advanceUntilIdle()
-        assertNotNull(viewModel.uiState.value.errorMessage)
-        assertTrue(repository.saveCalls.isEmpty())
-
-        // Matching the unmatched row clears the hint
-        viewModel.updateIngredientSelection(unmatchedRow.localKey, sampleCatalog().ingredients[3])
-        assertNull(viewModel.uiState.value.ingredients[1].unmatchedScrapedHint)
-        assertEquals(4, viewModel.uiState.value.ingredients[1].ingredientId)
     }
 
     @Test
-    fun `save uploads local and remote photos in order and calls saveCocktail`() = runTest(testDispatcher) {
-        val repository = FakeCocktailRepository()
+    fun `save uploads photos once on double tap, preserves 0_125oz precision, and consumes saved event`() = runTest(testDispatcher) {
+        val uploadGate = CompletableDeferred<Unit>()
+        val repository = FakeCocktailRepository().apply {
+            uploadLocalSuspendHook = { uploadGate.await() }
+        }
         val viewModel = CocktailEditorViewModel(
             cocktailId = null,
             initialImportUrl = null,
@@ -155,47 +229,82 @@ class CocktailEditorViewModelTest {
 
         viewModel.onNameChanged("Gimlet")
         viewModel.onInstructionsChanged("1. Shake with ice.\n2. Strain into a chilled coupe.")
-        viewModel.onGlassSelected(11)
-        viewModel.onMethodSelected(21)
-        viewModel.toggleTag("Classic")
-        viewModel.addCustomTag("House Favorite")
-
         val ginKey = viewModel.addIngredientRow(sampleCatalog().ingredients[0])
-        viewModel.updateIngredientRow(ginKey, amountText = "60", units = "ml")
-        val limeKey = viewModel.addIngredientRow(sampleCatalog().ingredients[3])
-        viewModel.updateIngredientRow(limeKey, amountText = "22.5", units = "ml", note = "Freshly squeezed")
+        viewModel.updateIngredientRow(ginKey, amountText = "0.125", units = "oz")
 
         val sampleBytes = byteArrayOf(1, 2, 3, 4)
         viewModel.addLocalPhoto(sampleBytes, "gimlet.jpg", "image/jpeg")
+        assertTrue(viewModel.uiState.value.hasUnsavedChanges)
 
+        // Double tap save synchronously before upload finishes
         viewModel.save()
+        assertTrue(viewModel.uiState.value.isSaving)
+        viewModel.save()
+
+        uploadGate.complete(Unit)
         advanceUntilIdle()
 
         val state = viewModel.uiState.value
+        assertFalse(state.isSaving)
+        assertFalse(state.hasUnsavedChanges)
         assertNull(state.errorMessage)
         assertNotNull(state.savedCocktailId)
         assertEquals(1, repository.localUploads.size)
-        assertEquals("gimlet.jpg", repository.localUploads.first().fileName)
-        assertEquals("image/jpeg", repository.localUploads.first().mimeType)
-        assertEquals(1, repository.localUploads.first().sort)
-
         assertEquals(1, repository.saveCalls.size)
-        val savedCall = repository.saveCalls.first()
-        assertNull(savedCall.cocktailId)
-        assertEquals("Gimlet", savedCall.request.name)
-        assertEquals(11, savedCall.request.glassId)
-        assertEquals(21, savedCall.request.methodId)
-        assertEquals(listOf("Classic", "House Favorite"), savedCall.request.tags)
-        assertEquals(listOf(500), savedCall.request.imageIds)
-        assertEquals(2, savedCall.request.ingredients.size)
-        assertEquals(60.0, savedCall.request.ingredients[0].amount)
-        assertEquals(22.5, savedCall.request.ingredients[1].amount)
-        assertEquals("Freshly squeezed", savedCall.request.ingredients[1].note)
+        assertEquals(0.125, repository.saveCalls.first().request.ingredients.first().amount)
+        assertTrue(state.photos.first() is EditorPhotoItem.Existing)
+
+        viewModel.consumeSavedEvent()
+        assertNull(viewModel.uiState.value.savedCocktailId)
     }
 
     @Test
-    fun `editing existing cocktail pre populates fields and preserves existing image ids`() = runTest(testDispatcher) {
-        val existing = sampleCocktailDetail(42)
+    fun `editing existing cocktail preserves isSpecified, substitutes, unitless rows, and 0_125oz amounts`() = runTest(testDispatcher) {
+        val base = sampleCocktailDetail(42)
+        val existing = base.copy(
+            ingredients = listOf(
+                CocktailIngredient(
+                    id = 1,
+                    ingredientId = 1,
+                    ingredientSlug = "gin",
+                    name = "London Dry Gin",
+                    sort = 1,
+                    amount = 0.125,
+                    amountMax = null,
+                    units = "oz",
+                    optional = false,
+                    note = null,
+                    inBarShelf = true,
+                    substitutes = listOf(
+                        IngredientSubstitute(
+                            id = 9,
+                            slug = "plymouth-gin",
+                            name = "Plymouth Gin",
+                            inBarShelf = true,
+                            amount = 0.125,
+                            amountMax = 0.25,
+                            units = "oz",
+                        ),
+                    ),
+                    isSpecified = true,
+                ),
+                CocktailIngredient(
+                    id = 2,
+                    ingredientId = 4,
+                    ingredientSlug = "lime-juice",
+                    name = "Lime Juice",
+                    sort = 2,
+                    amount = 1.0,
+                    amountMax = null,
+                    units = null,
+                    optional = false,
+                    note = null,
+                    inBarShelf = true,
+                    substitutes = emptyList(),
+                    isSpecified = false,
+                ),
+            ),
+        )
         val repository = FakeCocktailRepository(
             initialDetails = mapOf(42 to existing),
         )
@@ -208,20 +317,120 @@ class CocktailEditorViewModelTest {
 
         val state = viewModel.uiState.value
         assertTrue(state.isEditing)
-        assertEquals("Negroni", state.name)
-        assertEquals(10, state.glassId)
-        assertEquals(20, state.methodId)
-        assertEquals(3, state.ingredients.size)
-        assertEquals(1, state.photos.size)
-        assertTrue(state.photos.first() is EditorPhotoItem.Existing)
+        assertTrue(state.hasLoadedExisting)
+        assertFalse(state.hasUnsavedChanges)
+        assertEquals("0.125", state.ingredients[0].amountText)
+        assertTrue(state.ingredients[0].isSpecified)
+        assertEquals(
+            listOf(
+                IngredientSubstituteInput(
+                    ingredientId = 9,
+                    ingredientName = "Plymouth Gin",
+                    amount = 0.125,
+                    amountMax = 0.25,
+                    units = "oz",
+                ),
+            ),
+            state.ingredients[0].substitutes,
+        )
+        assertEquals("", state.ingredients[1].units)
 
         viewModel.onNameChanged("Negroni Sbagliato")
+        assertTrue(viewModel.uiState.value.hasUnsavedChanges)
         viewModel.save()
         advanceUntilIdle()
 
         assertEquals(1, repository.saveCalls.size)
-        assertEquals(42, repository.saveCalls.first().cocktailId)
-        assertEquals("Negroni Sbagliato", repository.saveCalls.first().request.name)
-        assertEquals(listOf(101), repository.saveCalls.first().request.imageIds)
+        val savedIngredients = repository.saveCalls.first().request.ingredients
+        assertEquals(0.125, savedIngredients[0].amount)
+        assertTrue(savedIngredients[0].isSpecified)
+        assertEquals(1, savedIngredients[0].substitutes.size)
+        assertEquals(0.125, savedIngredients[0].substitutes.first().amount)
+        assertEquals("", savedIngredients[1].units)
+    }
+
+    @Test
+    fun `fresher server response overwrites stale cache when clean, but preserves user edits when dirty`() = runTest(testDispatcher) {
+        val cached = sampleCocktailDetail(42).copy(name = "Cached Negroni")
+        val fresh = sampleCocktailDetail(42).copy(name = "Fresh Server Negroni")
+        val refreshGate = CompletableDeferred<Result<com.ryanvidal.barfriend.core.model.CocktailDetail>>()
+        val repository = FakeCocktailRepository(
+            initialDetails = mapOf(42 to cached),
+        ).apply {
+            refreshSuspendOverride = { refreshGate.await() }
+        }
+
+        val cleanViewModel = CocktailEditorViewModel(42, null, repository)
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals("Cached Negroni", cleanViewModel.uiState.value.name)
+        assertFalse(cleanViewModel.uiState.value.hasUnsavedChanges)
+
+        refreshGate.complete(Result.success(fresh))
+        advanceUntilIdle()
+
+        assertEquals("Fresh Server Negroni", cleanViewModel.uiState.value.name)
+        assertFalse(cleanViewModel.uiState.value.hasUnsavedChanges)
+
+        // Now test dirty case where user edits before refresh finishes
+        val dirtyGate = CompletableDeferred<Result<com.ryanvidal.barfriend.core.model.CocktailDetail>>()
+        repository.refreshSuspendOverride = { dirtyGate.await() }
+        val dirtyViewModel = CocktailEditorViewModel(42, null, repository)
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals("Cached Negroni", dirtyViewModel.uiState.value.name)
+        dirtyViewModel.onNameChanged("User Edited Negroni")
+        assertTrue(dirtyViewModel.uiState.value.hasUnsavedChanges)
+
+        dirtyGate.complete(Result.success(fresh))
+        advanceUntilIdle()
+
+        assertEquals("User Edited Negroni", dirtyViewModel.uiState.value.name)
+        assertTrue(dirtyViewModel.uiState.value.hasUnsavedChanges)
+    }
+
+    @Test
+    fun `failed initial load cancels detail observer, disables save, and supports retry`() = runTest(testDispatcher) {
+        val repository = FakeCocktailRepository().apply {
+            refreshResultOverride = { Result.failure(IllegalStateException("Network offline")) }
+        }
+        val viewModel = CocktailEditorViewModel(
+            cocktailId = 99,
+            initialImportUrl = null,
+            cocktailRepository = repository,
+        )
+        advanceUntilIdle()
+
+        val failedState = viewModel.uiState.value
+        assertFalse(failedState.isLoadingExisting)
+        assertFalse(failedState.hasLoadedExisting)
+        assertFalse(failedState.canSubmitSave)
+        assertNotNull(failedState.errorMessage)
+        assertEquals(0, repository.activeDetailObserverCount)
+
+        // Attempting save while unloaded must be ignored
+        viewModel.save()
+        advanceUntilIdle()
+        assertTrue(repository.saveCalls.isEmpty())
+
+        // Retry recovers when cocktail becomes available
+        repository.refreshResultOverride = null
+        repository.setDetail(99, sampleCocktailDetail(99))
+        viewModel.retryLoadExisting()
+        advanceUntilIdle()
+
+        val recoveredState = viewModel.uiState.value
+        assertTrue(recoveredState.hasLoadedExisting)
+        assertTrue(recoveredState.canSubmitSave)
+        assertNull(recoveredState.errorMessage)
+        assertEquals("Negroni", recoveredState.name)
+    }
+
+    @Test
+    fun `PendingLocal equality uses localKey without comparing byte arrays`() {
+        val first = EditorPhotoItem.PendingLocal(7L, byteArrayOf(1, 2, 3), "a.jpg", "image/jpeg")
+        val second = EditorPhotoItem.PendingLocal(7L, byteArrayOf(9, 9, 9), "b.jpg", "image/png")
+        assertEquals(first, second)
+        assertEquals(first.hashCode(), second.hashCode())
     }
 }

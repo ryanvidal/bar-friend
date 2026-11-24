@@ -30,6 +30,11 @@ kotlin {
             api(libs.compose.material3)
             api(libs.compose.material.icons.extended)
             api(libs.compose.ui)
+            implementation(libs.compose.ui.tooling.preview)
         }
     }
+}
+
+dependencies {
+    "androidRuntimeClasspath"(libs.compose.ui.tooling)
 }

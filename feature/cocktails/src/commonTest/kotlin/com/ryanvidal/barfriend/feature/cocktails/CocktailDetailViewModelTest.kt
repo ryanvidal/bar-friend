@@ -2,6 +2,7 @@ package com.ryanvidal.barfriend.feature.cocktails
 
 import com.ryanvidal.barfriend.core.data.AppPreferences
 import com.ryanvidal.barfriend.core.model.VolumeUnit
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -65,7 +66,7 @@ class CocktailDetailViewModelTest {
     }
 
     @Test
-    fun `updates serving scale factor and ignores non positive values`() = runTest(testDispatcher) {
+    fun `updates serving scale factor and rejects non positive or non finite values`() = runTest(testDispatcher) {
         val prefs = AppPreferences(InMemoryPreferencesDataStore())
         val repository = FakeCocktailRepository(
             initialDetails = mapOf(1 to sampleCocktailDetail(1)),
@@ -88,12 +89,16 @@ class CocktailDetailViewModelTest {
         assertEquals(0.5, viewModel.uiState.value.scaleFactor)
 
         viewModel.setScaleFactor(0.0)
+        viewModel.setScaleFactor(-1.0)
+        viewModel.setScaleFactor(Double.NaN)
+        viewModel.setScaleFactor(Double.POSITIVE_INFINITY)
+        viewModel.setScaleFactor(Double.NEGATIVE_INFINITY)
         advanceUntilIdle()
         assertEquals(0.5, viewModel.uiState.value.scaleFactor)
     }
 
     @Test
-    fun `toggles Make Mode and step checkmarks`() = runTest(testDispatcher) {
+    fun `toggles Make Mode and bounds checkedSteps to current instruction steps`() = runTest(testDispatcher) {
         val prefs = AppPreferences(InMemoryPreferencesDataStore())
         val repository = FakeCocktailRepository(
             initialDetails = mapOf(1 to sampleCocktailDetail(1)),
@@ -113,21 +118,35 @@ class CocktailDetailViewModelTest {
         assertTrue(viewModel.uiState.value.isMakeMode)
 
         viewModel.toggleStepChecked(0)
+        viewModel.toggleStepChecked(1)
         viewModel.toggleStepChecked(2)
         advanceUntilIdle()
-        assertEquals(setOf(0, 2), viewModel.uiState.value.checkedSteps)
+        assertEquals(setOf(0, 1, 2), viewModel.uiState.value.checkedSteps)
+
+        // Simulate editing recipe instructions shorter (from 3 steps down to 2 steps)
+        repository.setDetail(
+            1,
+            sampleCocktailDetail(1).copy(instructions = "1. Stir with ice.\n2. Strain."),
+        )
+        advanceUntilIdle()
+        assertEquals(setOf(0, 1), viewModel.uiState.value.checkedSteps)
 
         viewModel.toggleStepChecked(0)
         advanceUntilIdle()
-        assertEquals(setOf(2), viewModel.uiState.value.checkedSteps)
+        assertEquals(setOf(1), viewModel.uiState.value.checkedSteps)
     }
 
     @Test
-    fun `toggles favorite and deletes cocktail cleanly`() = runTest(testDispatcher) {
+    fun `guards concurrent favorite, delete, and refresh taps and consumes deleted event`() = runTest(testDispatcher) {
         val prefs = AppPreferences(InMemoryPreferencesDataStore())
+        val favGate = CompletableDeferred<Unit>()
+        val deleteGate = CompletableDeferred<Unit>()
         val repository = FakeCocktailRepository(
             initialDetails = mapOf(1 to sampleCocktailDetail(1)),
-        )
+        ).apply {
+            toggleFavoriteSuspendHook = { favGate.await() }
+            deleteSuspendHook = { deleteGate.await() }
+        }
 
         val viewModel = CocktailDetailViewModel(1, repository, prefs)
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
@@ -135,17 +154,53 @@ class CocktailDetailViewModelTest {
         }
         advanceUntilIdle()
 
-        assertFalse(viewModel.uiState.value.cocktail?.isFavorite == true)
-
+        // Concurrent favorite double tap
         viewModel.toggleFavorite()
-        advanceUntilIdle()
+        viewModel.toggleFavorite()
+        testDispatcher.scheduler.runCurrent()
         assertEquals(listOf(1), repository.toggledFavoriteIds)
+        favGate.complete(Unit)
+        advanceUntilIdle()
         assertTrue(viewModel.uiState.value.cocktail?.isFavorite == true)
 
+        // Concurrent delete double tap
         viewModel.deleteCocktail()
-        advanceUntilIdle()
+        viewModel.deleteCocktail()
+        testDispatcher.scheduler.runCurrent()
         assertEquals(listOf(1), repository.deletedCocktailIds)
+        deleteGate.complete(Unit)
+        advanceUntilIdle()
+
         assertTrue(viewModel.uiState.value.deleted)
+        viewModel.consumeDeletedEvent()
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.deleted)
+    }
+
+    @Test
+    fun `blocks duplicate concurrent refresh calls and exposes isRefreshing`() = runTest(testDispatcher) {
+        val prefs = AppPreferences(InMemoryPreferencesDataStore())
+        val refreshGate = CompletableDeferred<Result<com.ryanvidal.barfriend.core.model.CocktailDetail>>()
+        val repository = FakeCocktailRepository(
+            initialDetails = mapOf(1 to sampleCocktailDetail(1)),
+        ).apply {
+            refreshSuspendOverride = { refreshGate.await() }
+        }
+
+        val viewModel = CocktailDetailViewModel(1, repository, prefs)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.uiState.collect {}
+        }
+        testDispatcher.scheduler.runCurrent()
+
+        assertTrue(viewModel.uiState.value.isRefreshing)
+        viewModel.refresh()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(listOf(1), repository.refreshedCocktailIds)
+
+        refreshGate.complete(Result.success(sampleCocktailDetail(1)))
+        advanceUntilIdle()
+        assertFalse(viewModel.uiState.value.isRefreshing)
     }
 
     @Test

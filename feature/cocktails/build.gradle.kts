@@ -38,10 +38,16 @@ kotlin {
             implementation(libs.kotlinx.serialization.core)
             implementation(libs.coil.compose)
             implementation(libs.filekit.dialogs.compose)
+            implementation(libs.jetbrains.navigationevent.compose)
+            implementation(libs.compose.ui.tooling.preview)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
             implementation(libs.kotlinx.coroutines.test)
         }
     }
+}
+
+dependencies {
+    "androidRuntimeClasspath"(libs.compose.ui.tooling)
 }

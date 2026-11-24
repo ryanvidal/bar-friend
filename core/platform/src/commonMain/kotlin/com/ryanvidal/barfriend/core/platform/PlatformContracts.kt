@@ -29,6 +29,8 @@ data class LocalNetworkPermissionState(
     val isRequired: Boolean,
     val isGranted: Boolean,
     val requestPermission: () -> Unit,
+    val isPermanentlyDenied: Boolean = false,
+    val openAppSettings: () -> Unit = {},
 )
 
 @Composable

@@ -61,7 +61,7 @@ kotlin {
             implementation(libs.jetbrains.window.core)
             implementation(libs.kotlinx.serialization.core)
             implementation(libs.okio)
-            implementation(libs.coil.compose)
+            api(libs.coil.compose)
             implementation(libs.coil.network.ktor3)
         }
     }

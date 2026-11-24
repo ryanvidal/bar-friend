@@ -171,11 +171,59 @@ class SettingsViewModelTest {
         assertEquals("Network error", state.errorMessage)
     }
 
+    @Test
+    fun `syncNow surfaces Result failure in uiState errorMessage`() = runTest(testDispatcher) {
+        val cocktailRepository = FakeCocktailRepository().apply {
+            syncResult = Result.failure(IllegalStateException("Server unreachable"))
+        }
+        val viewModel = SettingsViewModel(
+            appPreferences = AppPreferences(FakePreferencesDataStore()),
+            sessionRepository = FakeSessionRepository(),
+            authRepository = FakeAuthRepository(),
+            cocktailRepository = cocktailRepository,
+        )
+
+        viewModel.syncNow()
+        advanceUntilIdle()
+        assertEquals("Server unreachable", viewModel.uiState.value.errorMessage)
+
+        cocktailRepository.syncResult = Result.failure(IllegalStateException())
+        viewModel.syncNow()
+        advanceUntilIdle()
+        assertEquals("Sync failed.", viewModel.uiState.value.errorMessage)
+    }
+
+    @Test
+    fun `setPreferredUnit and setThemeMode surface write failures without crashing`() = runTest(testDispatcher) {
+        val dataStore = FakePreferencesDataStore().apply {
+            writeError = IllegalStateException("Disk full")
+        }
+        val viewModel = SettingsViewModel(
+            appPreferences = AppPreferences(dataStore),
+            sessionRepository = FakeSessionRepository(),
+            authRepository = FakeAuthRepository(),
+            cocktailRepository = FakeCocktailRepository(),
+        )
+
+        viewModel.setPreferredUnit(VolumeUnit.ML)
+        advanceUntilIdle()
+        assertEquals(VolumeUnit.OZ, viewModel.uiState.value.preferredUnit)
+        assertEquals("Disk full", viewModel.uiState.value.errorMessage)
+
+        dataStore.writeError = IllegalStateException("Permission denied")
+        viewModel.setThemeMode(AppThemeMode.LIGHT)
+        advanceUntilIdle()
+        assertEquals(AppThemeMode.DARK, viewModel.uiState.value.themeMode)
+        assertEquals("Permission denied", viewModel.uiState.value.errorMessage)
+    }
+
     private class FakePreferencesDataStore : DataStore<Preferences> {
         private val state = MutableStateFlow(emptyPreferences())
+        var writeError: Throwable? = null
         override val data: Flow<Preferences> = state
 
         override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
+            writeError?.let { throw it }
             val updated = transform(state.value)
             state.value = updated
             return updated
@@ -205,7 +253,7 @@ class SettingsViewModelTest {
         override suspend fun currentBarId(): Int? =
             (_sessionState.value as? SessionState.Authenticated)?.activeBarId
 
-        override suspend fun onUnauthorized() {
+        override suspend fun onUnauthorized(failedToken: String) {
             clearSession()
         }
     }
@@ -233,6 +281,7 @@ class SettingsViewModelTest {
         private val _syncStatus = MutableStateFlow(initialStatus)
         override val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
         val syncForceCalls = mutableListOf<Boolean>()
+        var syncResult: Result<Unit> = Result.success(Unit)
 
         override fun observeCocktails(filter: CocktailFilter): Flow<List<CocktailSummary>> =
             flowOf(emptyList())
@@ -245,8 +294,10 @@ class SettingsViewModelTest {
 
         override suspend fun syncAll(force: Boolean): Result<Unit> {
             syncForceCalls += force
-            _syncStatus.value = SyncStatus(isSyncing = false, lastSyncedEpochMillis = 1_800_000_000_000L)
-            return Result.success(Unit)
+            if (syncResult.isSuccess) {
+                _syncStatus.value = SyncStatus(isSyncing = false, lastSyncedEpochMillis = 1_800_000_000_000L)
+            }
+            return syncResult
         }
 
         override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> =

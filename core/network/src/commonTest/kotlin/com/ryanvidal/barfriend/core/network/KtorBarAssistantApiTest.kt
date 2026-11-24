@@ -19,27 +19,42 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class KtorBarAssistantApiTest {
     @Test
-    fun `parses server version and login token`() = runTest {
+    fun `parses server version and login token without leaking active session headers`() = runTest {
+        var loginBody = ""
+        val seenAuth = mutableListOf<String?>()
+        val seenBar = mutableListOf<String?>()
+        var unauthorizedCalled = false
         val engine = MockEngine { request ->
+            seenAuth += request.headers[HttpHeaders.Authorization]
+            seenBar += request.headers[HEADER_BAR_ID]
             when {
                 request.url.encodedPath.endsWith("/api/server/version") -> respond(
                     content = """{"data":{"version":"v6.12.1","is_password_login_enabled":true,"is_ai_enabled":false}}""",
                     status = HttpStatusCode.OK,
                     headers = headersOf(HttpHeaders.ContentType, "application/json"),
                 )
-                request.url.encodedPath.endsWith("/api/auth/login") -> respond(
-                    content = """{"data":{"token":"1|secret-sanctum-token"}}""",
-                    status = HttpStatusCode.OK,
-                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
-                )
+                request.url.encodedPath.endsWith("/api/auth/login") -> {
+                    loginBody = request.body.readAsText()
+                    respond(
+                        content = """{"data":{"token":"1|secret-sanctum-token"}}""",
+                        status = HttpStatusCode.OK,
+                        headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                    )
+                }
                 else -> respond("Not found", HttpStatusCode.NotFound)
             }
         }
-        val sessionProvider = FakeSessionProvider()
+        val sessionProvider = FakeSessionProvider(
+            serverUrl = "https://other.example.com",
+            token = "1|existing-session-token",
+            barId = 9,
+            onUnauthorizedAction = { unauthorizedCalled = true },
+        )
         val api = KtorBarAssistantApi(createBarAssistantHttpClient(engine, sessionProvider), sessionProvider)
 
         val version = api.getServerVersion("https://bar.example.com")
@@ -48,6 +63,10 @@ class KtorBarAssistantApiTest {
 
         val token = api.login("https://bar.example.com", "user@example.com", "secret")
         assertEquals("1|secret-sanctum-token", token.token)
+        assertTrue(loginBody.contains("\"token_name\":\"Bar Friend Mobile\""), "Expected token_name in: $loginBody")
+        assertEquals(listOf<String?>(null, null), seenAuth)
+        assertEquals(listOf<String?>(null, null), seenBar)
+        assertFalse(unauthorizedCalled)
     }
 
     @Test
@@ -70,15 +89,44 @@ class KtorBarAssistantApiTest {
         )
         val api = KtorBarAssistantApi(createBarAssistantHttpClient(engine, sessionProvider), sessionProvider)
 
-        val bars = api.getBars()
+        val bars = api.getBars().data
         assertEquals("Bearer 1|token-abc", authHeader)
         assertEquals("7", barHeader)
         assertEquals(listOf(42), bars.map { it.id })
     }
 
     @Test
-    fun `triggers unauthorized callback and throws ApiException on 401`() = runTest {
+    fun `explicit auth getBars sends explicit token and omits session bar id`() = runTest {
+        var authHeader: String? = null
+        var barHeader: String? = null
         var unauthorizedCalled = false
+        val engine = MockEngine { request ->
+            authHeader = request.headers[HttpHeaders.Authorization]
+            barHeader = request.headers[HEADER_BAR_ID]
+            respond(
+                content = """{"data":[{"id":5,"name":"Explicit Bar","slug":"explicit-bar"}]}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val sessionProvider = FakeSessionProvider(
+            serverUrl = "https://old.example.com",
+            token = "1|old-token",
+            barId = 99,
+            onUnauthorizedAction = { unauthorizedCalled = true },
+        )
+        val api = KtorBarAssistantApi(createBarAssistantHttpClient(engine, sessionProvider), sessionProvider)
+
+        val bars = api.getBars(serverUrl = "https://new.example.com", token = "1|new-token").data
+        assertEquals("Bearer 1|new-token", authHeader)
+        assertNull(barHeader)
+        assertEquals(listOf(5), bars.map { it.id })
+        assertFalse(unauthorizedCalled)
+    }
+
+    @Test
+    fun `triggers unauthorized callback with failed token and throws ApiException on 401`() = runTest {
+        var capturedToken: String? = null
         val engine = MockEngine {
             respond(
                 content = """{"type":"api_error","message":"Unauthenticated."}""",
@@ -90,7 +138,7 @@ class KtorBarAssistantApiTest {
             serverUrl = "https://bar.example.com",
             token = "expired",
             barId = 1,
-            onUnauthorizedAction = { unauthorizedCalled = true },
+            onUnauthorizedAction = { failedToken -> capturedToken = failedToken },
         )
         val api = KtorBarAssistantApi(createBarAssistantHttpClient(engine, sessionProvider), sessionProvider)
 
@@ -99,11 +147,11 @@ class KtorBarAssistantApiTest {
         }
         assertEquals(401, ex.statusCode)
         assertEquals("Unauthenticated.", ex.message)
-        assertTrue(unauthorizedCalled)
+        assertEquals("expired", capturedToken)
     }
 
     @Test
-    fun `createCocktail follows Location header to fetch created cocktail`() = runTest {
+    fun `createCocktail parses Location with query params and ignores bare cocktails location`() = runTest {
         val requests = mutableListOf<Pair<HttpMethod, String>>()
         val engine = MockEngine { request ->
             requests += request.method to request.url.encodedPath
@@ -111,7 +159,7 @@ class KtorBarAssistantApiTest {
                 request.method == HttpMethod.Post && request.url.encodedPath == "/api/cocktails" -> respond(
                     content = "",
                     status = HttpStatusCode.Created,
-                    headers = headersOf(HttpHeaders.Location, "/api/cocktails/negroni-1"),
+                    headers = headersOf(HttpHeaders.Location, "/api/cocktails/negroni-1?bar_id=1#top"),
                 )
                 request.method == HttpMethod.Get && request.url.encodedPath == "/api/cocktails/negroni-1" -> respond(
                     content = """{"data":{"id":99,"slug":"negroni-1","name":"Negroni","instructions":"Stir with ice."}}""",
@@ -138,10 +186,22 @@ class KtorBarAssistantApiTest {
             ),
             requests,
         )
+
+        val badLocationEngine = MockEngine { request ->
+            respond(
+                content = "",
+                status = HttpStatusCode.Created,
+                headers = headersOf(HttpHeaders.Location, "/api/cocktails/"),
+            )
+        }
+        val badApi = KtorBarAssistantApi(createBarAssistantHttpClient(badLocationEngine, sessionProvider), sessionProvider)
+        assertFailsWith<BarAssistantApiException> {
+            badApi.createCocktail(sampleWriteRequest())
+        }
     }
 
     @Test
-    fun `updateCocktail sends cocktail_method_id and fetches updated cocktail`() = runTest {
+    fun `updateCocktail sends cocktail_method_id and explicit nulls then fetches updated cocktail`() = runTest {
         var putBody = ""
         val requests = mutableListOf<Pair<HttpMethod, String>>()
         val engine = MockEngine { request ->
@@ -169,6 +229,7 @@ class KtorBarAssistantApiTest {
         val updated = api.updateCocktail(42, sampleWriteRequest(methodId = 3))
         assertEquals(42, updated.id)
         assertTrue(putBody.contains("\"cocktail_method_id\":3"), "Expected cocktail_method_id in JSON: $putBody")
+        assertTrue(putBody.contains("\"source\":null"), "Expected explicit null source in JSON: $putBody")
         assertEquals(
             listOf(
                 HttpMethod.Put to "/api/cocktails/42",
@@ -338,6 +399,89 @@ class KtorBarAssistantApiTest {
         }
     }
 
+    @Test
+    fun `strips authorization and bar headers on cross-origin redirects for api and image clients`() = runTest {
+        val apiHops = mutableListOf<Triple<String, String?, String?>>()
+        val apiEngine = MockEngine { request ->
+            apiHops += Triple(
+                request.url.host,
+                request.headers[HttpHeaders.Authorization],
+                request.headers[HEADER_BAR_ID],
+            )
+            when (request.url.host) {
+                "bar.example.com" -> respond(
+                    content = "",
+                    status = HttpStatusCode.Found,
+                    headers = headersOf(HttpHeaders.Location, "https://cdn.external.org/redirected.json"),
+                )
+                else -> respond(
+                    content = """{"data":[]}""",
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                )
+            }
+        }
+        val imageHops = mutableListOf<Pair<String, String?>>()
+        val imageEngine = MockEngine { request ->
+            imageHops += request.url.host to request.headers[HttpHeaders.Authorization]
+            when (request.url.host) {
+                "bar.example.com" -> respond(
+                    content = "",
+                    status = HttpStatusCode.Found,
+                    headers = headersOf(HttpHeaders.Location, "https://cdn.external.org/photo.jpg"),
+                )
+                else -> respond(content = "ok", status = HttpStatusCode.OK)
+            }
+        }
+        val sessionProvider = FakeSessionProvider(
+            serverUrl = "https://bar.example.com",
+            token = "1|secret-token",
+            barId = 7,
+        )
+
+        val apiClient = createBarAssistantHttpClient(apiEngine, sessionProvider)
+        apiClient.get("https://bar.example.com/api/bars")
+        assertEquals(
+            listOf(
+                Triple("bar.example.com", "Bearer 1|secret-token", "7"),
+                Triple("cdn.external.org", null, null),
+            ),
+            apiHops,
+        )
+
+        val imageClient = ImageHttpClient(createImageHttpClient(imageEngine, sessionProvider))
+        imageClient.client.get("https://bar.example.com/uploads/1.jpg")
+        assertEquals(
+            listOf(
+                "bar.example.com" to "Bearer 1|secret-token",
+                "cdn.external.org" to null,
+            ),
+            imageHops,
+        )
+    }
+
+    @Test
+    fun `getCocktail encodes slug path segments safely`() = runTest {
+        var seenEncodedPath = ""
+        val engine = MockEngine { request ->
+            seenEncodedPath = request.url.encodedPath
+            respond(
+                content = """{"data":{"id":7,"slug":"pisco sour","name":"Pisco Sour","instructions":"Shake."}}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val sessionProvider = FakeSessionProvider(
+            serverUrl = "https://bar.example.com/bar",
+            token = "1|token",
+            barId = 1,
+        )
+        val api = KtorBarAssistantApi(createBarAssistantHttpClient(engine, sessionProvider), sessionProvider)
+
+        api.getCocktail("pisco sour")
+        assertEquals("/bar/api/cocktails/pisco%20sour", seenEncodedPath)
+    }
+
     private fun sampleWriteRequest(methodId: Int? = 1): CocktailWriteRequestDto =
         CocktailWriteRequestDto(
             name = "Negroni",
@@ -386,11 +530,11 @@ class KtorBarAssistantApiTest {
         private val serverUrl: String? = null,
         private val token: String? = null,
         private val barId: Int? = null,
-        private val onUnauthorizedAction: suspend () -> Unit = {},
+        private val onUnauthorizedAction: suspend (String) -> Unit = {},
     ) : NetworkSessionProvider {
         override suspend fun currentServerUrl(): String? = serverUrl
         override suspend fun currentToken(): String? = token
         override suspend fun currentBarId(): Int? = barId
-        override suspend fun onUnauthorized() = onUnauthorizedAction()
+        override suspend fun onUnauthorized(failedToken: String) = onUnauthorizedAction(failedToken)
     }
 }
