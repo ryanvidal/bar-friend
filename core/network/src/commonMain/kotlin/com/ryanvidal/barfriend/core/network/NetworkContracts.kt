@@ -49,10 +49,17 @@ object ServerUrlNormalizer {
 
     fun apiBaseUrl(serverUrl: String): String = "${normalize(serverUrl)}/api"
 
+    fun extractHost(raw: String): String? {
+        if (raw.isBlank()) return null
+        val normalized = runCatching { normalize(raw) }.getOrNull() ?: return null
+        return runCatching { Url(normalized).host }.getOrNull()
+            ?.removePrefix("[")
+            ?.removeSuffix("]")
+            ?.takeIf { it.isNotBlank() }
+    }
+
     fun isLocalHostUrl(raw: String): Boolean {
-        if (raw.isBlank()) return false
-        val normalized = runCatching { normalize(raw) }.getOrNull() ?: return false
-        val host = runCatching { Url(normalized).host }.getOrNull()?.takeIf { it.isNotBlank() } ?: return false
+        val host = extractHost(raw) ?: return false
         return isLocalHost(host)
     }
 

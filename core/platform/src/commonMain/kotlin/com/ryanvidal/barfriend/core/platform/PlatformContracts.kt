@@ -41,6 +41,8 @@ expect fun rememberLocalNetworkPermissionState(
 @Composable
 expect fun KeepScreenOnEffect(enabled: Boolean)
 
+expect suspend fun hostResolvesToLocalNetwork(host: String): Boolean
+
 @ContributesTo(AppScope::class)
 @BindingContainer
 object PlatformBindings {

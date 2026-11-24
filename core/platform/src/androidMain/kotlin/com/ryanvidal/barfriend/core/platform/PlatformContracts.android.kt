@@ -32,8 +32,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.IOException
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -290,4 +294,47 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null
+}
+
+actual suspend fun hostResolvesToLocalNetwork(host: String): Boolean {
+    val cleaned = host.trim().removePrefix("[").removeSuffix("]")
+    if (cleaned.isEmpty()) return false
+    return withTimeoutOrNull(2_000L) {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                InetAddress.getAllByName(cleaned).any { it.isLocalNetworkAddress() }
+            }.getOrElse { error ->
+                if (error is CancellationException) throw error
+                false
+            }
+        }
+    } ?: false
+}
+
+private fun InetAddress.isLocalNetworkAddress(): Boolean {
+    if (isLoopbackAddress || isSiteLocalAddress || isLinkLocalAddress || isAnyLocalAddress) {
+        return true
+    }
+    val bytes = address
+    return when (this) {
+        is Inet4Address -> {
+            if (bytes.size != 4) return false
+            val first = bytes[0].toInt() and 0xFF
+            val second = bytes[1].toInt() and 0xFF
+            first == 127 ||
+                first == 10 ||
+                (first == 192 && second == 168) ||
+                (first == 172 && second in 16..31) ||
+                (first == 169 && second == 254) ||
+                (first == 100 && second in 64..127)
+        }
+        is Inet6Address -> {
+            if (bytes.size != 16) return false
+            val firstByte = bytes[0].toInt() and 0xFF
+            val secondByte = bytes[1].toInt() and 0xFF
+            (firstByte and 0xFE) == 0xFC ||
+                (firstByte == 0xFE && (secondByte and 0xC0) == 0x80)
+        }
+        else -> false
+    }
 }

@@ -279,12 +279,17 @@ class AuthViewModelTest {
         viewModel.checkServer()
         advanceUntilIdle()
         assertTrue(viewModel.uiState.value.showLocalNetworkHintAfterFailure)
+        assertEquals(AuthActionType.VERIFY, viewModel.uiState.value.lastNetworkFailureAction)
+        assertEquals(1, viewModel.uiState.value.networkFailureEventId)
 
         viewModel.onServerUrlChanged("http://192.168.1.50")
         assertFalse(viewModel.uiState.value.showLocalNetworkHintAfterFailure)
+        assertNull(viewModel.uiState.value.lastNetworkFailureAction)
         viewModel.checkServer()
         advanceUntilIdle()
         assertFalse(viewModel.uiState.value.showLocalNetworkHintAfterFailure)
+        assertEquals(AuthActionType.VERIFY, viewModel.uiState.value.lastNetworkFailureAction)
+        assertEquals(2, viewModel.uiState.value.networkFailureEventId)
     }
 
     @Test
@@ -300,11 +305,14 @@ class AuthViewModelTest {
         viewModel.signIn()
         advanceUntilIdle()
         assertTrue(viewModel.uiState.value.showLocalNetworkHintAfterFailure)
+        assertEquals(AuthActionType.SIGN_IN, viewModel.uiState.value.lastNetworkFailureAction)
+        assertEquals(1, viewModel.uiState.value.networkFailureEventId)
 
         repository.signInResult = Result.failure(BarAssistantApiException(401, "Invalid credentials"))
         viewModel.signIn()
         advanceUntilIdle()
         assertFalse(viewModel.uiState.value.showLocalNetworkHintAfterFailure)
+        assertNull(viewModel.uiState.value.lastNetworkFailureAction)
     }
 
     @Test

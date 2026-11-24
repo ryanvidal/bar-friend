@@ -290,3 +290,5 @@ actual fun KeepScreenOnEffect(enabled: Boolean) {
         }
     }
 }
+
+actual suspend fun hostResolvesToLocalNetwork(host: String): Boolean = false

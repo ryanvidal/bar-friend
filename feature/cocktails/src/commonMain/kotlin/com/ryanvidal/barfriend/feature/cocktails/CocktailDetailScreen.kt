@@ -87,6 +87,7 @@ import com.ryanvidal.barfriend.core.model.CocktailTag
 import com.ryanvidal.barfriend.core.model.Glass
 import com.ryanvidal.barfriend.core.model.IngredientSubstitute
 import com.ryanvidal.barfriend.core.model.UnitFormatter
+import com.ryanvidal.barfriend.core.model.Utensil
 import com.ryanvidal.barfriend.core.model.VolumeUnit
 import com.ryanvidal.barfriend.core.platform.KeepScreenOnEffect
 import kotlin.math.abs
@@ -179,39 +180,45 @@ fun CocktailDetailContent(
                 },
                 actions = {
                     if (cocktail != null) {
-                        IconButton(
-                            onClick = onToggleFavorite,
-                            enabled = !uiState.isDeleting && !uiState.isTogglingFavorite,
-                        ) {
-                            Icon(
-                                imageVector = if (cocktail.isFavorite) {
-                                    Icons.Rounded.Favorite
-                                } else {
-                                    Icons.Rounded.FavoriteBorder
-                                },
-                                contentDescription = if (cocktail.isFavorite) {
-                                    "Remove from favorites"
-                                } else {
-                                    "Add to favorites"
-                                },
-                                tint = if (cocktail.isFavorite) {
-                                    MaterialTheme.colorScheme.tertiary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                },
-                            )
-                        }
-                        IconButton(
-                            onClick = { onEditCocktail(cocktail.id) },
-                            enabled = !uiState.isDeleting,
-                        ) {
-                            Icon(Icons.Rounded.Edit, contentDescription = "Edit recipe")
-                        }
-                        IconButton(
-                            onClick = { showDeleteConfirmation = true },
-                            enabled = !uiState.isDeleting,
-                        ) {
-                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete recipe")
+                        if (uiState.isMakeMode) {
+                            TextButton(onClick = onToggleMakeMode) {
+                                Text("Exit")
+                            }
+                        } else {
+                            IconButton(
+                                onClick = onToggleFavorite,
+                                enabled = !uiState.isDeleting && !uiState.isTogglingFavorite,
+                            ) {
+                                Icon(
+                                    imageVector = if (cocktail.isFavorite) {
+                                        Icons.Rounded.Favorite
+                                    } else {
+                                        Icons.Rounded.FavoriteBorder
+                                    },
+                                    contentDescription = if (cocktail.isFavorite) {
+                                        "Remove from favorites"
+                                    } else {
+                                        "Add to favorites"
+                                    },
+                                    tint = if (cocktail.isFavorite) {
+                                        MaterialTheme.colorScheme.tertiary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                )
+                            }
+                            IconButton(
+                                onClick = { onEditCocktail(cocktail.id) },
+                                enabled = !uiState.isDeleting,
+                            ) {
+                                Icon(Icons.Rounded.Edit, contentDescription = "Edit recipe")
+                            }
+                            IconButton(
+                                onClick = { showDeleteConfirmation = true },
+                                enabled = !uiState.isDeleting,
+                            ) {
+                                Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete recipe")
+                            }
                         }
                     }
                 },
@@ -268,7 +275,7 @@ fun CocktailDetailContent(
                         .fillMaxSize()
                         .padding(innerPadding),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (uiState.isMakeMode) 12.dp else 16.dp),
                 ) {
                     item(key = "make_mode_banner") {
                         MakeModeBanner(
@@ -277,38 +284,50 @@ fun CocktailDetailContent(
                         )
                     }
 
-                    item(key = "hero_images") {
-                        HeroImageCarousel(
-                            cocktailName = cocktail.name,
-                            images = cocktail.images,
-                        )
-                    }
-
-                    item(key = "header_meta") {
-                        CocktailHeaderSection(cocktail = cocktail)
-                    }
-
-                    if (!cocktail.description.isNullOrBlank() || !cocktail.shortDescription.isNullOrBlank()) {
-                        item(key = "description") {
-                            val descriptionText = cocktail.description?.takeIf { it.isNotBlank() }
-                                ?: cocktail.shortDescription.orEmpty()
-                            OutlinedCard(
-                                shape = MaterialTheme.shapes.medium,
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text(
-                                    text = descriptionText,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(14.dp),
-                                )
+                    if (uiState.isMakeMode) {
+                        val hasPrepDetails = cocktail.glass != null ||
+                            cocktail.method != null ||
+                            cocktail.utensils.isNotEmpty() ||
+                            !cocktail.garnish.isNullOrBlank()
+                        if (hasPrepDetails) {
+                            item(key = "make_mode_prep") {
+                                MakeModePrepCard(cocktail = cocktail)
                             }
                         }
-                    }
+                    } else {
+                        item(key = "hero_images") {
+                            HeroImageCarousel(
+                                cocktailName = cocktail.name,
+                                images = cocktail.images,
+                            )
+                        }
 
-                    if (!cocktail.garnish.isNullOrBlank() || !cocktail.source.isNullOrBlank() || cocktail.utensils.isNotEmpty()) {
-                        item(key = "extras") {
-                            CocktailExtrasCard(cocktail = cocktail)
+                        item(key = "header_meta") {
+                            CocktailHeaderSection(cocktail = cocktail)
+                        }
+
+                        if (!cocktail.description.isNullOrBlank() || !cocktail.shortDescription.isNullOrBlank()) {
+                            item(key = "description") {
+                                val descriptionText = cocktail.description?.takeIf { it.isNotBlank() }
+                                    ?: cocktail.shortDescription.orEmpty()
+                                OutlinedCard(
+                                    shape = MaterialTheme.shapes.medium,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        text = descriptionText,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(14.dp),
+                                    )
+                                }
+                            }
+                        }
+
+                        if (!cocktail.garnish.isNullOrBlank() || !cocktail.source.isNullOrBlank() || cocktail.utensils.isNotEmpty()) {
+                            item(key = "extras") {
+                                CocktailExtrasCard(cocktail = cocktail)
+                            }
                         }
                     }
 
@@ -318,6 +337,7 @@ fun CocktailDetailContent(
                             selectedUnit = uiState.selectedUnit,
                             onSelectScale = onSelectScale,
                             onSelectUnit = onSelectUnit,
+                            compact = uiState.isMakeMode,
                         )
                     }
 
@@ -462,7 +482,7 @@ private fun MakeModeBanner(
                     role = Role.Switch,
                     onValueChange = { onToggle() },
                 )
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(horizontal = 16.dp, vertical = if (isMakeMode) 8.dp else 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -485,19 +505,13 @@ private fun MakeModeBanner(
                         MaterialTheme.colorScheme.onSurface
                     },
                 )
-                Text(
-                    text = if (isMakeMode) {
-                        "Tap any step below to check it off"
-                    } else {
-                        "Keep screen awake and enlarge recipe steps"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isMakeMode) {
-                        MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
+                if (!isMakeMode) {
+                    Text(
+                        text = "Keep screen awake and focus on drink assembly",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             Switch(
                 checked = isMakeMode,
@@ -676,6 +690,45 @@ private fun CocktailHeaderSection(cocktail: CocktailDetail) {
 }
 
 @Composable
+private fun MakeModePrepCard(cocktail: CocktailDetail) {
+    val setupParts = buildList {
+        cocktail.glass?.name?.takeIf { it.isNotBlank() }?.let { add("Glass: $it") }
+        cocktail.method?.name?.takeIf { it.isNotBlank() }?.let { add("Method: $it") }
+    }
+    OutlinedCard(
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (setupParts.isNotEmpty()) {
+                Text(
+                    text = setupParts.joinToString("  ·  "),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            if (cocktail.utensils.isNotEmpty()) {
+                Text(
+                    text = "Tools: ${cocktail.utensils.joinToString(", ") { it.name }}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            cocktail.garnish?.takeIf { it.isNotBlank() }?.let { garnish ->
+                Text(
+                    text = "Garnish: $garnish",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun CocktailExtrasCard(cocktail: CocktailDetail) {
     OutlinedCard(
         shape = MaterialTheme.shapes.medium,
@@ -716,6 +769,7 @@ private fun ScaleAndUnitControls(
     selectedUnit: VolumeUnit,
     onSelectScale: (Double) -> Unit,
     onSelectUnit: (VolumeUnit) -> Unit,
+    compact: Boolean = false,
 ) {
     Surface(
         shape = MaterialTheme.shapes.large,
@@ -724,8 +778,8 @@ private fun ScaleAndUnitControls(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(if (compact) 12.dp else 14.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp),
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
@@ -857,11 +911,13 @@ private fun DetailIngredientRow(
                         )
                     }
                 }
-                Text(
-                    text = statusLabel,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = statusColor,
-                )
+                if (!isMakeMode || !ingredient.inBarShelf) {
+                    Text(
+                        text = statusLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = statusColor,
+                    )
+                }
                 ingredient.note?.takeIf { it.isNotBlank() }?.let { note ->
                     Text(
                         text = note,
@@ -1014,7 +1070,7 @@ private fun previewCocktailDetail(): CocktailDetail = CocktailDetail(
     method = CocktailMethod(20, "Stir", 20),
     images = emptyList(),
     tags = listOf(CocktailTag(30, "Classic"), CocktailTag(31, "Bitter")),
-    utensils = emptyList(),
+    utensils = listOf(Utensil(1, "Mixing glass"), Utensil(2, "Barspoon")),
     ingredients = listOf(
         CocktailIngredient(
             id = 1,

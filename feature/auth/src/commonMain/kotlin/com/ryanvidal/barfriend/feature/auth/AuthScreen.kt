@@ -46,8 +46,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -73,16 +75,14 @@ import com.ryanvidal.barfriend.core.designsystem.LocalBarFriendStatusColors
 import com.ryanvidal.barfriend.core.model.AppThemeMode
 import com.ryanvidal.barfriend.core.model.ServerInfo
 import com.ryanvidal.barfriend.core.network.ServerUrlNormalizer
+import com.ryanvidal.barfriend.core.platform.hostResolvesToLocalNetwork
 import com.ryanvidal.barfriend.core.platform.rememberLocalNetworkPermissionState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 
 @Serializable
 data object AuthRoute : NavKey
-
-private enum class PendingAuthAction {
-    VERIFY,
-    SIGN_IN,
-}
 
 private const val LOCAL_NETWORK_DENIED_MESSAGE =
     "Local network access was denied. Enable Nearby Devices / Local Network access in Settings to connect to local servers."
@@ -94,22 +94,28 @@ fun AuthScreen(
     initialServerUrl: String? = null,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val coroutineScope = rememberCoroutineScope()
     var didSeedServerUrl by rememberSaveable(initialServerUrl) { mutableStateOf(false) }
-    var hasPromptedLocalNetwork by rememberSaveable { mutableStateOf(false) }
-    var pendingAction by rememberSaveable { mutableStateOf<PendingAuthAction?>(null) }
+    var hasPromptedForCurrentUrl by rememberSaveable { mutableStateOf(false) }
+    var showRecoveryBanner by rememberSaveable { mutableStateOf(false) }
+    var isResolvingLocalNetwork by remember { mutableStateOf(false) }
+    var pendingAction by rememberSaveable { mutableStateOf<AuthActionType?>(null) }
     var localNetworkDeniedMessage by rememberSaveable { mutableStateOf<String?>(null) }
+    var lastHandledFailureEventId by rememberSaveable { mutableIntStateOf(0) }
 
     val localNetworkPermission = rememberLocalNetworkPermissionState { granted ->
         val action = pendingAction
         pendingAction = null
         if (granted) {
+            showRecoveryBanner = false
             localNetworkDeniedMessage = null
             when (action) {
-                PendingAuthAction.VERIFY -> viewModel.checkServer()
-                PendingAuthAction.SIGN_IN -> viewModel.signIn()
+                AuthActionType.VERIFY -> viewModel.checkServer()
+                AuthActionType.SIGN_IN -> viewModel.signIn()
                 null -> Unit
             }
         } else {
+            showRecoveryBanner = true
             localNetworkDeniedMessage = LOCAL_NETWORK_DENIED_MESSAGE
         }
     }
@@ -123,47 +129,86 @@ fun AuthScreen(
 
     LaunchedEffect(localNetworkPermission.isGranted) {
         if (localNetworkPermission.isGranted) {
+            showRecoveryBanner = false
             localNetworkDeniedMessage = null
         }
     }
 
-    val isLiteralLocalUrl = ServerUrlNormalizer.isLocalHostUrl(uiState.serverUrl)
+    LaunchedEffect(uiState.networkFailureEventId) {
+        val eventId = uiState.networkFailureEventId
+        val failedAction = uiState.lastNetworkFailureAction
+        if (eventId > lastHandledFailureEventId && failedAction != null) {
+            lastHandledFailureEventId = eventId
+            if (localNetworkPermission.isRequired && !localNetworkPermission.isGranted) {
+                if (!hasPromptedForCurrentUrl && !localNetworkPermission.isPermanentlyDenied) {
+                    hasPromptedForCurrentUrl = true
+                    pendingAction = failedAction
+                    localNetworkPermission.requestPermission()
+                } else {
+                    showRecoveryBanner = true
+                }
+            }
+        }
+    }
+
     val showLocalNetworkBanner = localNetworkPermission.isRequired &&
         !localNetworkPermission.isGranted &&
-        (isLiteralLocalUrl || uiState.showLocalNetworkHintAfterFailure)
+        showRecoveryBanner
 
-    val runWithLocalNetworkCheck: (PendingAuthAction, () -> Unit) -> Unit = { action, proceed ->
-        if (
-            localNetworkPermission.isRequired &&
-            !localNetworkPermission.isGranted &&
-            isLiteralLocalUrl &&
-            !hasPromptedLocalNetwork &&
-            !localNetworkPermission.isPermanentlyDenied
-        ) {
-            hasPromptedLocalNetwork = true
-            pendingAction = action
-            localNetworkDeniedMessage = null
-            localNetworkPermission.requestPermission()
-        } else {
-            localNetworkDeniedMessage = null
-            proceed()
+    val runWithLocalNetworkCheck: (AuthActionType, () -> Unit) -> Unit = { action, proceed ->
+        if (!isResolvingLocalNetwork && pendingAction == null) {
+            if (!localNetworkPermission.isRequired || localNetworkPermission.isGranted || hasPromptedForCurrentUrl) {
+                localNetworkDeniedMessage = null
+                proceed()
+            } else {
+                val targetUrl = uiState.serverUrl.trim()
+                localNetworkDeniedMessage = null
+                isResolvingLocalNetwork = true
+                coroutineScope.launch {
+                    try {
+                        val isLocal = ServerUrlNormalizer.isLocalHostUrl(targetUrl) ||
+                            (ServerUrlNormalizer.extractHost(targetUrl)?.let { hostResolvesToLocalNetwork(it) } == true)
+                        if (uiState.serverUrl.trim() != targetUrl) return@launch
+                        if (isLocal) {
+                            hasPromptedForCurrentUrl = true
+                            if (localNetworkPermission.isPermanentlyDenied) {
+                                showRecoveryBanner = true
+                                localNetworkDeniedMessage = LOCAL_NETWORK_DENIED_MESSAGE
+                            } else {
+                                pendingAction = action
+                                localNetworkPermission.requestPermission()
+                            }
+                        } else {
+                            proceed()
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } finally {
+                        isResolvingLocalNetwork = false
+                    }
+                }
+            }
         }
     }
 
     AuthContent(
         uiState = uiState,
         onServerUrlChanged = { value ->
-            localNetworkDeniedMessage = null
+            if (value != uiState.serverUrl) {
+                hasPromptedForCurrentUrl = false
+                showRecoveryBanner = false
+                localNetworkDeniedMessage = null
+            }
             viewModel.onServerUrlChanged(value)
         },
         onEmailChanged = viewModel::onEmailChanged,
         onPasswordChanged = viewModel::onPasswordChanged,
         onTogglePasswordVisibility = viewModel::onTogglePasswordVisibility,
         onCheckServerClick = {
-            runWithLocalNetworkCheck(PendingAuthAction.VERIFY, viewModel::checkServer)
+            runWithLocalNetworkCheck(AuthActionType.VERIFY, viewModel::checkServer)
         },
         onSignInClick = {
-            runWithLocalNetworkCheck(PendingAuthAction.SIGN_IN, viewModel::signIn)
+            runWithLocalNetworkCheck(AuthActionType.SIGN_IN, viewModel::signIn)
         },
         showLocalNetworkBanner = showLocalNetworkBanner,
         isLocalNetworkPermanentlyDenied = localNetworkPermission.isPermanentlyDenied,
@@ -176,7 +221,7 @@ fun AuthScreen(
                 localNetworkPermission.requestPermission()
             }
         },
-        isPermissionPending = pendingAction != null,
+        isPermissionPending = isResolvingLocalNetwork || pendingAction != null,
         localErrorMessage = localNetworkDeniedMessage,
         modifier = modifier,
     )

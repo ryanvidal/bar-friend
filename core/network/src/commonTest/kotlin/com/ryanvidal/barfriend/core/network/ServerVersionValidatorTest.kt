@@ -102,4 +102,14 @@ class ServerVersionValidatorTest {
         assertFalse(ServerUrlNormalizer.isCleartextPublicUrl("http://[::1]:8080"))
         assertFalse(ServerUrlNormalizer.isCleartextPublicUrl(""))
     }
+
+    @Test
+    fun `extracts host cleanly across schemes, subpaths, and ipv6`() {
+        assertEquals("bar.example.com", ServerUrlNormalizer.extractHost("https://bar.example.com/bar/api/"))
+        assertEquals("192.168.1.20", ServerUrlNormalizer.extractHost("192.168.1.20:8080/bar"))
+        assertEquals("::1", ServerUrlNormalizer.extractHost("::1/bar"))
+        assertEquals("bar.example.com", ServerUrlNormalizer.extractHost("user@bar.example.com:8443"))
+        assertEquals(null, ServerUrlNormalizer.extractHost("   "))
+        assertEquals(null, ServerUrlNormalizer.extractHost("ftp://bar.example.com"))
+    }
 }

@@ -14,6 +14,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+enum class AuthActionType {
+    VERIFY,
+    SIGN_IN,
+}
+
 data class AuthUiState(
     val serverUrl: String = "",
     val email: String = "",
@@ -24,6 +29,8 @@ data class AuthUiState(
     val serverStatus: ServerCheckResult? = null,
     val errorMessage: String? = null,
     val showLocalNetworkHintAfterFailure: Boolean = false,
+    val lastNetworkFailureAction: AuthActionType? = null,
+    val networkFailureEventId: Int = 0,
 )
 
 class AuthViewModel(
@@ -47,6 +54,7 @@ class AuthViewModel(
                     serverStatus = null,
                     errorMessage = null,
                     showLocalNetworkHintAfterFailure = false,
+                    lastNetworkFailureAction = null,
                 )
             }
         }
@@ -94,6 +102,7 @@ class AuthViewModel(
                 serverStatus = null,
                 errorMessage = null,
                 showLocalNetworkHintAfterFailure = false,
+                lastNetworkFailureAction = null,
             )
         }
 
@@ -102,13 +111,16 @@ class AuthViewModel(
                 val (result, isNetworkFailure) = try {
                     val checkResult = authRepository.checkServer(targetUrl)
                     val networkFailure = checkResult is ServerCheckResult.Error &&
-                        !isHttpStatusMessage(checkResult.message)
+                        !isHttpStatusMessage(checkResult.message) &&
+                        !isNonNetworkAuthMessage(checkResult.message)
                     checkResult to networkFailure
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
                     val message = e.message?.takeIf { it.isNotBlank() } ?: "Could not verify server."
-                    val networkFailure = e !is BarAssistantApiException && !isHttpStatusMessage(message)
+                    val networkFailure = e !is BarAssistantApiException &&
+                        !isHttpStatusMessage(message) &&
+                        !isNonNetworkAuthMessage(message)
                     ServerCheckResult.Error(message) to networkFailure
                 }
 
@@ -120,6 +132,12 @@ class AuthViewModel(
                             isCheckingServer = false,
                             serverStatus = result,
                             showLocalNetworkHintAfterFailure = showLocalNetworkHint,
+                            lastNetworkFailureAction = if (isNetworkFailure) AuthActionType.VERIFY else null,
+                            networkFailureEventId = if (isNetworkFailure) {
+                                state.networkFailureEventId + 1
+                            } else {
+                                state.networkFailureEventId
+                            },
                         )
                     } else {
                         state.copy(isCheckingServer = false)
@@ -163,6 +181,7 @@ class AuthViewModel(
                 isSigningIn = true,
                 errorMessage = null,
                 showLocalNetworkHintAfterFailure = false,
+                lastNetworkFailureAction = null,
             )
         }
 
@@ -189,19 +208,27 @@ class AuthViewModel(
                             serverStatus = null,
                             errorMessage = null,
                             showLocalNetworkHintAfterFailure = false,
+                            lastNetworkFailureAction = null,
                         )
                     }
                 },
                 onFailure = { error ->
                     val message = error.message?.takeIf { msg -> msg.isNotBlank() } ?: "Sign in failed."
-                    val showLocalNetworkHint = !ServerUrlNormalizer.isLocalHostUrl(serverUrl) &&
-                        isNetworkOrTimeoutFailure(error, message)
+                    val isNetworkFailure = isNetworkOrTimeoutFailure(error, message)
+                    val showLocalNetworkHint = isNetworkFailure &&
+                        !ServerUrlNormalizer.isLocalHostUrl(serverUrl)
                     _uiState.update { state ->
                         val suppressDuplicate = isDuplicateServerStatusError(state.serverStatus, message)
                         state.copy(
                             isSigningIn = false,
                             errorMessage = if (suppressDuplicate) null else message,
                             showLocalNetworkHintAfterFailure = showLocalNetworkHint,
+                            lastNetworkFailureAction = if (isNetworkFailure) AuthActionType.SIGN_IN else null,
+                            networkFailureEventId = if (isNetworkFailure) {
+                                state.networkFailureEventId + 1
+                            } else {
+                                state.networkFailureEventId
+                            },
                         )
                     }
                 },
@@ -240,8 +267,12 @@ class AuthViewModel(
         message.contains("not supported", ignoreCase = true) ||
             message.contains("unsupported", ignoreCase = true) ||
             message.contains("password login is disabled", ignoreCase = true) ||
+            message.contains("missing a host", ignoreCase = true) ||
+            message.contains("Malformed", ignoreCase = true) ||
+            message.contains("Invalid port", ignoreCase = true) ||
             message.equals("No bars were found for this account.", ignoreCase = true) ||
             message.equals("Server URL is required.", ignoreCase = true) ||
+            message.equals("Server URL cannot be blank.", ignoreCase = true) ||
             message.equals("Email is required.", ignoreCase = true) ||
             message.equals("Password is required.", ignoreCase = true)
 
