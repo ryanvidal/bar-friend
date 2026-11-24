@@ -605,8 +605,8 @@ class InventoryAvailabilityAndRepositoryTest {
         assertNull(restoredSessionRepo.currentUserId())
         assertNull(preferences.currentSettings().activeUserId)
 
-        // Setting and clearing session clears activeUserId
-        restoredSessionRepo.setActiveUserId(88)
+        // Setting and clearing session clears currentUserId
+        restoredSessionRepo.setCurrentUserId(88)
         assertEquals(88, restoredSessionRepo.currentUserId())
         restoredSessionRepo.clearSession()
         assertNull(restoredSessionRepo.currentUserId())
@@ -796,7 +796,7 @@ class InventoryAvailabilityAndRepositoryTest {
     }
 
     @Test
-    fun `DefaultSessionRepository clears userId on same-server same-bar token change and rejects stale token setActiveUserId`() = runTest {
+    fun `DefaultSessionRepository clears userId on same-server same-bar token change and rejects stale token setCurrentUserId`() = runTest {
         val dataStore = FakePreferencesDataStore()
         val preferences = AppPreferences(dataStore)
         val tokenStore = FakeTokenStore()
@@ -822,10 +822,10 @@ class InventoryAvailabilityAndRepositoryTest {
         assertNull(preferences.currentSettings().activeUserId)
         assertTrue(db.shoppingListFlow.value.isEmpty())
 
-        // Stale setActiveUserId from User A's token is rejected; User B's token succeeds
-        sessionRepo.setActiveUserId(10, expectedToken = "tokenA")
+        // Stale setCurrentUserId from User A's token is rejected; User B's token succeeds
+        sessionRepo.setCurrentUserId(10, expectedToken = "tokenA")
         assertNull(sessionRepo.currentUserId())
-        sessionRepo.setActiveUserId(20, expectedToken = "tokenB")
+        sessionRepo.setCurrentUserId(20, expectedToken = "tokenB")
         assertEquals(20, sessionRepo.currentUserId())
     }
 
@@ -835,7 +835,7 @@ class InventoryAvailabilityAndRepositoryTest {
         val sessionRepo = FakeSessionRepository(
             SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
         )
-        sessionRepo.setActiveUserId(10) // Stale cached userId
+        sessionRepo.setCurrentUserId(10) // Stale cached userId
 
         var addAttempts = 0
         val api = FakeBarAssistantApi(
@@ -885,6 +885,50 @@ class InventoryAvailabilityAndRepositoryTest {
         sessionRepo.clearSession()
         repo.lastBackgroundSyncJob?.join()
         assertEquals(null, cocktailRepo.syncStatus.value.errorMessage)
+    }
+
+    @Test
+    fun `syncAllSilent clears prior interactive sync failure on snapshot write and preserves status when skipped or failed`() = runTest {
+        val db = FakeBarDatabase()
+        val coordinator = BarMutationCoordinator()
+        val api = FakeBarAssistantApi()
+        val sessionRepo = FakeSessionRepository(SessionState.Unauthenticated())
+        val cocktailRepo = DefaultCocktailRepository(
+            api = api,
+            sessionRepository = sessionRepo,
+            cocktailDao = db.cocktailDao,
+            inventoryDao = db.inventoryDao,
+            catalogDao = db.catalogDao,
+            syncDao = db.syncDao,
+            mutationCoordinator = coordinator,
+        )
+        sessionRepo.setAuthenticatedWithoutEmittingFirst(
+            SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
+        )
+        assertTrue(cocktailRepo.syncAll(force = false).isSuccess)
+
+        // Failed interactive sync publishes errorMessage
+        api.onGetCocktails = { throw IllegalStateException("Offline") }
+        assertTrue(cocktailRepo.syncAll(force = true).isFailure)
+        assertEquals("Offline", cocktailRepo.syncStatus.value.errorMessage)
+
+        // Successful silent sync clears prior errorMessage and updates timestamp
+        api.onGetCocktails = { emptyList() }
+        assertTrue(cocktailRepo.syncAllSilent(force = true).isSuccess)
+        assertNull(cocktailRepo.syncStatus.value.errorMessage)
+        assertTrue((cocktailRepo.syncStatus.value.lastSyncedEpochMillis ?: 0L) > 0L)
+
+        // Silent sync that fails or skips snapshot write preserves previous error status
+        api.onGetCocktails = { throw IllegalStateException("Timeout") }
+        assertTrue(cocktailRepo.syncAll(force = true).isFailure)
+        assertEquals("Timeout", cocktailRepo.syncStatus.value.errorMessage)
+
+        api.onGetCocktails = {
+            coordinator.withMutationLock { coordinator.bumpGenerationLocked() }
+            emptyList()
+        }
+        assertTrue(cocktailRepo.syncAllSilent(force = true).isSuccess)
+        assertEquals("Timeout", cocktailRepo.syncStatus.value.errorMessage)
     }
 
     private fun applyAvailabilityRecalculation(
@@ -985,11 +1029,11 @@ class InventoryAvailabilityAndRepositoryTest {
 
         override fun currentSessionEpoch(): Long = epoch
 
-        override suspend fun setActiveUserId(userId: Int) {
+        override suspend fun setCurrentUserId(userId: Int) {
             this.userId = userId
         }
 
-        override suspend fun setActiveUserId(userId: Int?, expectedToken: String?) {
+        override suspend fun setCurrentUserId(userId: Int?, expectedToken: String?) {
             this.userId = userId
         }
 

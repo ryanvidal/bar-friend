@@ -15,7 +15,6 @@ import com.ryanvidal.barfriend.core.model.Glass
 import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.UploadedImage
 import com.ryanvidal.barfriend.core.network.BarAssistantApi
-import com.ryanvidal.barfriend.core.network.BarAssistantApiException
 import com.ryanvidal.barfriend.core.network.dto.CocktailDto
 import com.ryanvidal.barfriend.core.network.dto.CocktailMethodDto
 import com.ryanvidal.barfriend.core.network.dto.GlassDto
@@ -193,13 +192,14 @@ class DefaultCocktailRepository(
         val barId = currentActiveBarId()
         val serverUrl = currentServerUrl()
         if (barId == null || serverUrl.isNullOrBlank()) {
-            if (!silent) {
-                _syncStatus.value = SyncStatus(
+            publishInteractiveSyncStatus(
+                silent = silent,
+                status = SyncStatus(
                     isSyncing = false,
                     lastSyncedEpochMillis = null,
                     errorMessage = "No active bar selected.",
-                )
-            }
+                ),
+            )
             return@withLock Result.failure(IllegalStateException("No active bar selected."))
         }
 
@@ -211,13 +211,14 @@ class DefaultCocktailRepository(
         val previousTimestamp = _syncStatus.value.lastSyncedEpochMillis
             ?: catalogDao.getSyncTimestamp(syncKey(barId))
         try {
-            if (!silent) {
-                _syncStatus.value = SyncStatus(
+            publishInteractiveSyncStatus(
+                silent = silent,
+                status = SyncStatus(
                     isSyncing = true,
                     lastSyncedEpochMillis = previousTimestamp,
                     errorMessage = null,
-                )
-            }
+                ),
+            )
 
             for (attempt in 1..MAX_SYNC_ATTEMPTS) {
                 val startGen = mutationCoordinator.withMutationLock { mutationCoordinator.currentGenerationLocked() }
@@ -291,38 +292,47 @@ class DefaultCocktailRepository(
                 }
             }
 
-            if (!silent) {
-                _syncStatus.value = SyncStatus(
+            // All retry attempts were superseded by concurrent mutations; keep existing status if silent
+            // because no snapshot was written.
+            publishInteractiveSyncStatus(
+                silent = silent,
+                status = SyncStatus(
                     isSyncing = false,
                     lastSyncedEpochMillis = previousTimestamp,
                     errorMessage = null,
-                )
-            }
+                ),
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
-            if (!silent && isSessionStillActive(serverUrl, barId)) {
-                _syncStatus.value = SyncStatus(
-                    isSyncing = false,
-                    lastSyncedEpochMillis = previousTimestamp,
-                    errorMessage = null,
+            if (isSessionStillActive(serverUrl, barId)) {
+                publishInteractiveSyncStatus(
+                    silent = silent,
+                    status = SyncStatus(
+                        isSyncing = false,
+                        lastSyncedEpochMillis = previousTimestamp,
+                        errorMessage = null,
+                    ),
                 )
             } else if (sessionRepository.sessionState.value is SessionState.Unauthenticated) {
                 _syncStatus.value = SyncStatus()
             }
             throw e
         } catch (e: Throwable) {
-            if (!silent && isSessionStillActive(serverUrl, barId)) {
-                _syncStatus.value = SyncStatus(
-                    isSyncing = false,
-                    lastSyncedEpochMillis = previousTimestamp,
-                    errorMessage = e.message?.takeIf { it.isNotBlank() } ?: "Sync failed.",
+            if (isSessionStillActive(serverUrl, barId)) {
+                publishInteractiveSyncStatus(
+                    silent = silent,
+                    status = SyncStatus(
+                        isSyncing = false,
+                        lastSyncedEpochMillis = previousTimestamp,
+                        errorMessage = e.message?.takeIf { it.isNotBlank() } ?: "Sync failed.",
+                    ),
                 )
             }
             Result.failure(e)
         }
     }
 
-    override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> = runApiCall {
+    override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> = runSuspendCatching {
         val barId = requireActiveBarId()
         val serverUrl = currentServerUrl()
         val dto = api.getCocktail(cocktailId.toString())
@@ -340,7 +350,7 @@ class DefaultCocktailRepository(
             val barId = currentActiveBarId()
                 ?: return@withLock Result.failure(IllegalStateException("No active bar selected."))
             val existing = cocktailDao.observeCocktailWithIngredients(barId, cocktailId).first()
-                ?: return@withLock runApiCall {
+                ?: return@withLock runSuspendCatching {
                     val actual = api.toggleFavorite(cocktailId)
                     mutationCoordinator.withMutationLock { mutationCoordinator.bumpGenerationLocked() }
                     actual
@@ -386,7 +396,7 @@ class DefaultCocktailRepository(
     override suspend fun saveCocktail(
         cocktailId: Int?,
         request: CocktailUpsertRequest,
-    ): Result<CocktailDetail> = runApiCall {
+    ): Result<CocktailDetail> = runSuspendCatching {
         val barId = requireActiveBarId()
         val serverUrl = currentServerUrl()
         val writeDto = request.toWriteDto()
@@ -407,7 +417,7 @@ class DefaultCocktailRepository(
         }
     }
 
-    override suspend fun deleteCocktail(cocktailId: Int): Result<Unit> = runApiCall {
+    override suspend fun deleteCocktail(cocktailId: Int): Result<Unit> = runSuspendCatching {
         val barId = requireActiveBarId()
         api.deleteCocktail(cocktailId)
         mutationCoordinator.withMutationLock {
@@ -423,7 +433,7 @@ class DefaultCocktailRepository(
         fileName: String,
         mimeType: String?,
         sort: Int,
-    ): Result<UploadedImage> = runApiCall {
+    ): Result<UploadedImage> = runSuspendCatching {
         val serverUrl = currentServerUrl()
         api.uploadImage(
             bytes = bytes,
@@ -437,7 +447,7 @@ class DefaultCocktailRepository(
         imageUrl: String,
         copyright: String?,
         sort: Int,
-    ): Result<UploadedImage> = runApiCall {
+    ): Result<UploadedImage> = runSuspendCatching {
         val serverUrl = currentServerUrl()
         api.uploadImageFromUrl(
             imageUrl = imageUrl,
@@ -446,7 +456,7 @@ class DefaultCocktailRepository(
         ).toUploadedImage(serverUrl)
     }
 
-    override suspend fun scrapeRecipeFromUrl(url: String): Result<ScrapedCocktail> = runApiCall {
+    override suspend fun scrapeRecipeFromUrl(url: String): Result<ScrapedCocktail> = runSuspendCatching {
         api.scrapeCocktail(url).toModel()
     }
 
@@ -498,21 +508,11 @@ class DefaultCocktailRepository(
             fetchAllPages { page -> api.getBarInventoryIngredientIds(barId = barId, page = page, perPage = 200) }
         }
         val shoppingListDeferred = async {
-            runCatching {
-                val token = sessionRepository.currentToken()
-                val userId = sessionRepository.currentUserId()
-                    ?: api.getProfile().id.also { sessionRepository.setActiveUserId(it, expectedToken = token) }
-                try {
+            runSuspendCatching {
+                withResolvedUserIdAnd403Retry(api, sessionRepository) { userId ->
                     api.getShoppingList(barId = barId, userId = userId)
-                } catch (e: BarAssistantApiException) {
-                    if (e.statusCode != 403) throw e
-                    sessionRepository.setActiveUserId(null, expectedToken = token)
-                    val refreshedUserId = api.getProfile().id
-                    sessionRepository.setActiveUserId(refreshedUserId, expectedToken = token)
-                    api.getShoppingList(barId = barId, userId = refreshedUserId)
                 }
-            }.onFailure { if (it is CancellationException) throw it }
-                .getOrNull()
+            }.getOrNull()
         }
 
         SyncPayload(
@@ -548,12 +548,10 @@ class DefaultCocktailRepository(
         (sessionRepository.sessionState.value as? SessionState.Authenticated)?.serverUrl
             ?: sessionRepository.currentServerUrl()
 
-    private suspend inline fun <T> runApiCall(block: suspend () -> T): Result<T> = try {
-        Result.success(block())
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Throwable) {
-        Result.failure(e)
+    private fun publishInteractiveSyncStatus(silent: Boolean, status: SyncStatus) {
+        if (!silent) {
+            _syncStatus.value = status
+        }
     }
 
     private fun syncKey(barId: Int): String = "bar_${barId}_sync"

@@ -45,10 +45,10 @@ interface SessionRepository : NetworkSessionProvider {
     ) = saveSession(serverUrl, token, barId, barName)
     suspend fun clearSession()
     suspend fun currentUserId(): Int? = null
-    suspend fun setActiveUserId(userId: Int) = Unit
-    suspend fun setActiveUserId(userId: Int?, expectedToken: String?) {
+    suspend fun setCurrentUserId(userId: Int) = Unit
+    suspend fun setCurrentUserId(userId: Int?, expectedToken: String?) {
         if (userId != null) {
-            setActiveUserId(userId)
+            setCurrentUserId(userId)
         }
     }
     fun currentSessionEpoch(): Long = 0L
@@ -112,8 +112,7 @@ class DefaultSessionRepository(
             val settings = appPreferences.currentSettings()
             val serverUrl = settings.serverUrl?.takeIf { it.isNotBlank() }
             if (serverUrl == null && !token.isNullOrBlank()) {
-                runCatching { tokenStore.clearToken() }
-                    .onFailure { if (it is CancellationException) throw it }
+                runSuspendCatching { tokenStore.clearToken() }
             }
             if (!token.isNullOrBlank() && serverUrl != null) {
                 cachedToken = token
@@ -126,8 +125,7 @@ class DefaultSessionRepository(
                     activeBarName = settings.activeBarName,
                 )
             } else {
-                runCatching { appPreferences.setActiveUserId(null) }
-                    .onFailure { if (it is CancellationException) throw it }
+                runSuspendCatching { appPreferences.setActiveUserId(null) }
                 cachedToken = null
                 cachedServerUrl = serverUrl
                 cachedBarId = null
@@ -252,9 +250,9 @@ class DefaultSessionRepository(
 
     override fun currentSessionEpoch(): Long = sessionEpoch
 
-    override suspend fun setActiveUserId(userId: Int) = setActiveUserId(userId, expectedToken = null)
+    override suspend fun setCurrentUserId(userId: Int) = setCurrentUserId(userId, expectedToken = null)
 
-    override suspend fun setActiveUserId(userId: Int?, expectedToken: String?) {
+    override suspend fun setCurrentUserId(userId: Int?, expectedToken: String?) {
         stateMutex.withLock {
             if (!initialized) {
                 restoreSessionLocked()

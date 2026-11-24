@@ -10,7 +10,6 @@ import com.ryanvidal.barfriend.core.model.RecommendedIngredient
 import com.ryanvidal.barfriend.core.model.ShoppingListItem
 import com.ryanvidal.barfriend.core.model.UnlockedCocktail
 import com.ryanvidal.barfriend.core.network.BarAssistantApi
-import com.ryanvidal.barfriend.core.network.BarAssistantApiException
 import com.ryanvidal.barfriend.core.network.dto.ShoppingListIngredientInputDto
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
@@ -131,11 +130,10 @@ class DefaultInventoryRepository(
         val originEpoch = sessionRepository.currentSessionEpoch()
         val originBarId = currentActiveBarId()
             ?: return Result.failure(IllegalStateException("No active bar selected."))
-        return runApiCall {
+        return runSuspendCatching {
             mutationCoordinator.withMutationLock {
                 ensureSessionEpochValid(originEpoch, originBarId)
-                val (token, userId) = resolveUserIdAndToken()
-                val remoteItems = executeWith403UserIdRetry(userId, token) { resolvedUserId ->
+                val remoteItems = withResolvedUserIdAnd403Retry(api, sessionRepository) { resolvedUserId ->
                     api.getShoppingList(barId = originBarId, userId = resolvedUserId)
                 }
                 ensureSessionEpochValid(originEpoch, originBarId)
@@ -157,7 +155,7 @@ class DefaultInventoryRepository(
         val originEpoch = sessionRepository.currentSessionEpoch()
         val originBarId = currentActiveBarId()
             ?: return Result.failure(IllegalStateException("No active bar selected."))
-        return runApiCall {
+        return runSuspendCatching {
             mutationCoordinator.withMutationLock {
                 ensureSessionEpochValid(originEpoch, originBarId)
                 mutateBarShelfLocked(
@@ -194,7 +192,7 @@ class DefaultInventoryRepository(
         val originEpoch = sessionRepository.currentSessionEpoch()
         val originBarId = currentActiveBarId()
             ?: return Result.failure(IllegalStateException("No active bar selected."))
-        return runApiCall {
+        return runSuspendCatching {
             mutationCoordinator.withMutationLock {
                 ensureSessionEpochValid(originEpoch, originBarId)
                 removeFromShoppingListLocked(
@@ -212,7 +210,7 @@ class DefaultInventoryRepository(
         val originEpoch = sessionRepository.currentSessionEpoch()
         val originBarId = currentActiveBarId()
             ?: return Result.failure(IllegalStateException("No active bar selected."))
-        return runApiCall {
+        return runSuspendCatching {
             mutationCoordinator.withMutationLock {
                 ensureSessionEpochValid(originEpoch, originBarId)
                 var shelfMutated = false
@@ -239,7 +237,7 @@ class DefaultInventoryRepository(
         }
     }
 
-    override suspend fun getRecommendedIngredients(): Result<List<RecommendedIngredient>> = runApiCall {
+    override suspend fun getRecommendedIngredients(): Result<List<RecommendedIngredient>> = runSuspendCatching {
         val barId = mutationCoordinator.withMutationLock { requireActiveBarId() }
         val recommended = api.getRecommendedBarIngredients(barId)
             .distinctBy { it.id }
@@ -256,7 +254,7 @@ class DefaultInventoryRepository(
 
     override suspend fun getUnlockedCocktails(ingredientId: Int): Result<List<UnlockedCocktail>> {
         if (ingredientId <= 0) return Result.success(emptyList())
-        return runApiCall {
+        return runSuspendCatching {
             val barId = mutationCoordinator.withMutationLock { requireActiveBarId() }
             api.getExtraCocktailsForIngredient(barId, ingredientId)
                 .distinctBy { it.id }
@@ -274,10 +272,10 @@ class DefaultInventoryRepository(
         val originEpoch = sessionRepository.currentSessionEpoch()
         val originBarId = currentActiveBarId()
             ?: return Result.failure(IllegalStateException("No active bar selected."))
-        return runApiCall {
+        return runSuspendCatching {
             mutationCoordinator.withMutationLock {
                 ensureSessionEpochValid(originEpoch, originBarId)
-                val (token, initialUserId) = resolveUserIdAndToken()
+                val (token, initialUserId) = resolveUserIdAndToken(api, sessionRepository)
                 ensureSessionEpochValid(originEpoch, originBarId)
                 val previousItems = inventoryDao.getShoppingListSnapshot(originBarId)
                 val previousById = previousItems.associateBy { it.ingredientId }
@@ -305,7 +303,7 @@ class DefaultInventoryRepository(
                         mutationCoordinator.bumpGenerationLocked()
                         inventoryDao.upsertShoppingListItems(targetEntities)
                     }
-                    executeWith403UserIdRetry(initialUserId, token) { resolvedId ->
+                    executeWith403UserIdRetry(api, sessionRepository, initialUserId, token) { resolvedId ->
                         api.addToShoppingList(
                             barId = originBarId,
                             userId = resolvedId,
@@ -406,7 +404,7 @@ class DefaultInventoryRepository(
         originEpoch: Long,
         ids: List<Int>,
     ) {
-        val (token, initialUserId) = resolveUserIdAndToken()
+        val (token, initialUserId) = resolveUserIdAndToken(api, sessionRepository)
         ensureSessionEpochValid(originEpoch, barId)
         val previousItems = inventoryDao.getShoppingListSnapshot(barId)
 
@@ -419,7 +417,7 @@ class DefaultInventoryRepository(
                 mutationCoordinator.bumpGenerationLocked()
                 inventoryDao.deleteShoppingListItems(barId, ids)
             }
-            executeWith403UserIdRetry(initialUserId, token) { resolvedId ->
+            executeWith403UserIdRetry(api, sessionRepository, initialUserId, token) { resolvedId ->
                 api.removeFromShoppingList(barId = barId, userId = resolvedId, ingredientIds = ids)
             }
         } catch (e: CancellationException) {
@@ -471,32 +469,8 @@ class DefaultInventoryRepository(
         lastBackgroundSyncJob?.cancel()
         lastBackgroundSyncJob = backgroundScope.launch {
             if (sessionRepository.currentSessionEpoch() != originEpoch) return@launch
-            runCatching { cocktailRepository.syncAllSilent(force = true) }
-                .onFailure { if (it is CancellationException) throw it }
+            runSuspendCatching { cocktailRepository.syncAllSilent(force = true) }
         }
-    }
-
-    private suspend fun resolveUserIdAndToken(): Pair<String?, Int> {
-        val token = sessionRepository.currentToken()
-        val cached = sessionRepository.currentUserId()
-        if (cached != null) return token to cached
-        val fetched = api.getProfile().id
-        sessionRepository.setActiveUserId(fetched, expectedToken = token)
-        return token to fetched
-    }
-
-    private suspend fun <T> executeWith403UserIdRetry(
-        initialUserId: Int,
-        token: String?,
-        block: suspend (Int) -> T,
-    ): T = try {
-        block(initialUserId)
-    } catch (e: BarAssistantApiException) {
-        if (e.statusCode != 403) throw e
-        sessionRepository.setActiveUserId(null, expectedToken = token)
-        val refreshed = api.getProfile().id
-        sessionRepository.setActiveUserId(refreshed, expectedToken = token)
-        block(refreshed)
     }
 
     private suspend fun isSessionEpochValid(expectedEpoch: Long, expectedBarId: Int): Boolean =
@@ -514,12 +488,4 @@ class DefaultInventoryRepository(
 
     private suspend fun requireActiveBarId(): Int =
         currentActiveBarId() ?: throw IllegalStateException("No active bar selected.")
-
-    private suspend inline fun <T> runApiCall(block: suspend () -> T): Result<T> = try {
-        Result.success(block())
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Throwable) {
-        Result.failure(e)
-    }
 }
