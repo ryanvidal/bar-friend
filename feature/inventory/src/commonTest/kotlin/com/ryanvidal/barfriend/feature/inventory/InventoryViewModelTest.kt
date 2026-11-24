@@ -183,6 +183,7 @@ class InventoryViewModelTest {
         assertEquals(setOf(3, 4), viewModel.uiState.value.inFlightShelfIds)
         assertTrue(viewModel.uiState.value.allIngredients.first { it.id == 3 }.inBarShelf)
         assertTrue(viewModel.uiState.value.allIngredients.first { it.id == 4 }.inBarShelf)
+        assertTrue(viewModel.uiState.value.recommendations.none { it.id == 3 || it.id == 4 })
         assertEquals(4, viewModel.uiState.value.inStockCount)
         assertEquals(listOf(listOf(3) to true, listOf(4) to true), inventoryRepo.setInBarShelfCalls)
 
@@ -191,6 +192,7 @@ class InventoryViewModelTest {
         advanceUntilIdle()
 
         assertFalse(viewModel.uiState.value.allIngredients.first { it.id == 3 }.inBarShelf)
+        assertTrue(viewModel.uiState.value.recommendations.any { it.id == 3 })
         assertEquals("Network unavailable", viewModel.uiState.value.snackbarMessage)
         viewModel.consumeSnackbar()
         testDispatcher.scheduler.runCurrent()
@@ -202,6 +204,7 @@ class InventoryViewModelTest {
 
         assertTrue(viewModel.uiState.value.inFlightShelfIds.isEmpty())
         assertTrue(viewModel.uiState.value.allIngredients.first { it.id == 4 }.inBarShelf)
+        assertTrue(viewModel.uiState.value.recommendations.none { it.id == 4 })
         assertEquals(3, viewModel.uiState.value.inStockCount)
         assertEquals(2, inventoryRepo.getRecommendedCalls)
 

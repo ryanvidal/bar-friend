@@ -183,7 +183,7 @@ class DefaultInventoryRepository(
     }
 
     override suspend fun getRecommendedIngredients(): Result<List<RecommendedIngredient>> = runApiCall {
-        val barId = requireActiveBarId()
+        val barId = mutationMutex.withLock { requireActiveBarId() }
         val recommended = api.getRecommendedBarIngredients(barId)
         val ingredientsById = catalogDao.getIngredientsForBar(barId).associateBy { it.id }
         val shoppingListIds = inventoryDao.getShoppingListSnapshot(barId)
@@ -199,7 +199,7 @@ class DefaultInventoryRepository(
     override suspend fun getUnlockedCocktails(ingredientId: Int): Result<List<UnlockedCocktail>> {
         if (ingredientId <= 0) return Result.success(emptyList())
         return runApiCall {
-            val barId = requireActiveBarId()
+            val barId = mutationMutex.withLock { requireActiveBarId() }
             api.getExtraCocktailsForIngredient(barId, ingredientId)
                 .map { it.toUnlockedCocktail() }
         }

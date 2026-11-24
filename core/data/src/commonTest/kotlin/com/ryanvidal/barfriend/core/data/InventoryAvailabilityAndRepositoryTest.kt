@@ -51,6 +51,9 @@ import com.ryanvidal.barfriend.core.network.dto.TokenDto
 import com.ryanvidal.barfriend.core.network.dto.UtensilDto
 import com.ryanvidal.barfriend.core.platform.SecureTokenStore
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -58,6 +61,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -428,6 +432,58 @@ class InventoryAvailabilityAndRepositoryTest {
         assertEquals(listOf(UnlockedCocktail(101, "last-word", "Last Word")), unlocked)
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `getRecommendedIngredients waits for in-flight bar shelf mutation before querying server`() = runTest {
+        val db = FakeBarDatabase()
+        db.seedIngredient(barId = 7, id = 5, slug = "chartreuse", name = "Green Chartreuse", categoryName = "Liqueur")
+        val shelfAddStarted = CompletableDeferred<Unit>()
+        val allowShelfAddFinish = CompletableDeferred<Unit>()
+        var recommendCalls = 0
+        var serverHasBottle5 = false
+
+        val api = FakeBarAssistantApi().apply {
+            onAddBarInventory = { _, ids ->
+                shelfAddStarted.complete(Unit)
+                allowShelfAddFinish.await()
+                if (5 in ids) serverHasBottle5 = true
+            }
+            onGetRecommendedBarIngredients = { _ ->
+                recommendCalls += 1
+                if (serverHasBottle5) {
+                    emptyList()
+                } else {
+                    listOf(IngredientRecommendDto(5, "chartreuse", "Green Chartreuse", potentialCocktails = 9))
+                }
+            }
+        }
+        val repo = DefaultInventoryRepository(
+            api = api,
+            sessionRepository = FakeSessionRepository(
+                SessionState.Authenticated("https://bar.example.com", activeBarId = 7, activeBarName = "Home"),
+            ),
+            cocktailRepository = FakeCocktailRepository(),
+            cocktailDao = db.cocktailDao,
+            inventoryDao = db.inventoryDao,
+            catalogDao = db.catalogDao,
+        )
+
+        val addDeferred = async { repo.setInBarShelf(listOf(5), inStock = true) }
+        shelfAddStarted.await()
+        assertTrue(5 in db.inventoryDao.getBarShelfIngredientIds(7))
+
+        val recommendDeferred = async { repo.getRecommendedIngredients() }
+        runCurrent()
+        assertEquals(0, recommendCalls)
+
+        allowShelfAddFinish.complete(Unit)
+        assertTrue(addDeferred.await().isSuccess)
+        val recommended = recommendDeferred.await().getOrThrow()
+        assertEquals(1, recommendCalls)
+        assertTrue(recommended.isEmpty())
+        repo.lastBackgroundSyncJob?.join()
+    }
+
     @Test
     fun `DefaultSessionRepository and DefaultAuthRepository persist and clear activeUserId across restarts and server switches`() = runTest {
         val dataStore = FakePreferencesDataStore()
@@ -646,6 +702,7 @@ class InventoryAvailabilityAndRepositoryTest {
         var onAddBarInventory: suspend (Int, List<Int>) -> Unit = { _, _ -> }
         var onRemoveBarInventory: suspend (Int, List<Int>) -> Unit = { _, _ -> }
         var onGetProfile: suspend () -> ProfileDto = { profile }
+        var onGetRecommendedBarIngredients: suspend (Int) -> List<IngredientRecommendDto> = { recommendedIngredients }
         var onGetShoppingList: suspend (Int) -> List<ShoppingListItemDto> = { shoppingListItems }
         var onAddShoppingList: suspend (Int, List<ShoppingListIngredientInputDto>) -> Unit = { _, _ -> }
         var onRemoveShoppingList: suspend (Int, List<Int>) -> Unit = { _, _ -> }
@@ -734,7 +791,7 @@ class InventoryAvailabilityAndRepositoryTest {
         }
 
         override suspend fun getRecommendedBarIngredients(barId: Int): List<IngredientRecommendDto> =
-            recommendedIngredients
+            onGetRecommendedBarIngredients(barId)
 
         override suspend fun getExtraCocktailsForIngredient(barId: Int, ingredientId: Int): List<CocktailBasicDto> =
             extraCocktails[ingredientId].orEmpty()

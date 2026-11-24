@@ -193,10 +193,12 @@ class InventoryViewModel(
             matchesStock && matchesCategory && matchesQuery
         }
 
-        val syncedRecommendations = local.recommendations.map { rec ->
-            val inShopping = rec.id in effectiveShoppingIds
-            if (rec.inShoppingList == inShopping) rec else rec.copy(inShoppingList = inShopping)
-        }
+        val syncedRecommendations = local.recommendations
+            .filter { rec -> rec.id !in effectiveShelfIds }
+            .map { rec ->
+                val inShopping = rec.id in effectiveShoppingIds
+                if (rec.inShoppingList == inShopping) rec else rec.copy(inShoppingList = inShopping)
+            }
 
         val unlockedSheet = local.unlockedSheetDraft?.let { draft ->
             UnlockedCocktailsSheetState(
