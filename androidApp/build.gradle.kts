@@ -35,4 +35,6 @@ dependencies {
     implementation(projects.composeApp)
     implementation(projects.core.platform)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.coil.compose)
+    implementation(libs.jetbrains.lifecycle.runtime.compose)
 }

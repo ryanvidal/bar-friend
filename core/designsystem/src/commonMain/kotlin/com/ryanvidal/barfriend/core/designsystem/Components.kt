@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.LocalBar
 import androidx.compose.material.icons.rounded.ShoppingBag
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
@@ -19,11 +20,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.ryanvidal.barfriend.core.model.AppThemeMode
 
 @Composable
 fun InventoryStatusChip(
@@ -31,13 +35,10 @@ fun InventoryStatusChip(
     missingIngredientsCount: Int,
     modifier: Modifier = Modifier,
 ) {
+    val statusColors = LocalBarFriendStatusColors.current
     val isReady = inBarShelf || missingIngredientsCount == 0
-    val containerColor = if (isReady) {
-        StatusReadyGreen.copy(alpha = 0.16f)
-    } else {
-        StatusMissingTerracotta.copy(alpha = 0.16f)
-    }
-    val contentColor = if (isReady) StatusReadyGreen else StatusMissingTerracotta
+    val contentColor = if (isReady) statusColors.ready else statusColors.missing
+    val containerColor = contentColor.copy(alpha = 0.16f)
     val label = if (isReady) {
         "Ready to make"
     } else if (missingIngredientsCount == 1) {
@@ -147,5 +148,52 @@ fun SectionHeader(
             color = MaterialTheme.colorScheme.onSurface,
         )
         trailing?.invoke()
+    }
+}
+
+@Composable
+private fun DesignSystemComponentsPreviewContent() {
+    Surface(color = MaterialTheme.colorScheme.background) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            SectionHeader(
+                title = "Bar Shelf Status",
+                trailing = {
+                    TextButton(onClick = {}) {
+                        Text("See All")
+                    }
+                },
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                InventoryStatusChip(inBarShelf = true, missingIngredientsCount = 0)
+                InventoryStatusChip(inBarShelf = false, missingIngredientsCount = 1)
+                InventoryStatusChip(inBarShelf = false, missingIngredientsCount = 3)
+            }
+            EmptyStateCard(
+                icon = Icons.Rounded.LocalBar,
+                title = "No cocktails found",
+                subtitle = "Try clearing a filter or syncing your bar inventory.",
+                actionLabel = "Reset Filters",
+                onActionClick = {},
+            )
+        }
+    }
+}
+
+@Preview
+@Composable
+private fun DesignSystemComponentsDarkPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.DARK) {
+        DesignSystemComponentsPreviewContent()
+    }
+}
+
+@Preview
+@Composable
+private fun DesignSystemComponentsLightPreview() {
+    BarFriendTheme(themeMode = AppThemeMode.LIGHT) {
+        DesignSystemComponentsPreviewContent()
     }
 }

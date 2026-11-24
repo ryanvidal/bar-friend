@@ -18,14 +18,30 @@ interface SecureTokenStore {
 interface PlatformPaths {
     fun databasePath(name: String): String
     fun dataStorePath(name: String): String
+    fun cachePath(name: String): String
 }
 
 expect fun createSecureTokenStore(context: PlatformContext): SecureTokenStore
 
 expect fun createPlatformPaths(context: PlatformContext): PlatformPaths
 
+data class LocalNetworkPermissionState(
+    val isRequired: Boolean,
+    val isGranted: Boolean,
+    val requestPermission: () -> Unit,
+    val isPermanentlyDenied: Boolean = false,
+    val openAppSettings: () -> Unit = {},
+)
+
+@Composable
+expect fun rememberLocalNetworkPermissionState(
+    onResult: (granted: Boolean) -> Unit = {},
+): LocalNetworkPermissionState
+
 @Composable
 expect fun KeepScreenOnEffect(enabled: Boolean)
+
+expect suspend fun hostResolvesToLocalNetwork(host: String): Boolean
 
 @ContributesTo(AppScope::class)
 @BindingContainer

@@ -29,11 +29,16 @@ data class CocktailEntity(
     val methodName: String?,
     val mainImageThumbUrl: String?,
     val mainImageUrl: String?,
+    val imagesJson: String,
     val isFavorite: Boolean,
     val inBarShelf: Boolean,
     val missingIngredientsCount: Int,
+    val missingIngredientNamesJson: String,
     val tagsJson: String,
     val utensilsJson: String,
+    val author: String?,
+    val originBar: String?,
+    val year: Int?,
     val updatedAt: String?,
 )
 
@@ -62,7 +67,11 @@ data class CocktailIngredientEntity(
     val optional: Boolean,
     val note: String?,
     val inBarShelf: Boolean,
+    val inBarShelfAsSubstitute: Boolean,
+    val inBarShelfAsVariant: Boolean,
+    val inBarShelfAsComplex: Boolean,
     val substitutesJson: String,
+    val isSpecified: Boolean = false,
 )
 
 @Entity(
@@ -129,6 +138,16 @@ data class CocktailMethodEntity(
     indices = [Index(value = ["barId"])],
 )
 data class TagEntity(
+    @PrimaryKey val id: Int,
+    val barId: Int,
+    val name: String,
+)
+
+@Entity(
+    tableName = "utensils",
+    indices = [Index(value = ["barId"])],
+)
+data class UtensilEntity(
     @PrimaryKey val id: Int,
     val barId: Int,
     val name: String,

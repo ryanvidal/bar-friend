@@ -2,11 +2,11 @@
   "formatVersion": 1,
   "database": {
     "version": 1,
-    "identityHash": "7d12abdd1490d172c8a059bb7601dcca",
+    "identityHash": "cddc51ec3320c0befc81dafcd15a07e1",
     "entities": [
       {
         "tableName": "cocktails",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `barId` INTEGER NOT NULL, `slug` TEXT NOT NULL, `name` TEXT NOT NULL, `shortDescription` TEXT, `instructions` TEXT NOT NULL, `garnish` TEXT, `description` TEXT, `source` TEXT, `abv` REAL, `glassId` INTEGER, `glassName` TEXT, `methodId` INTEGER, `methodName` TEXT, `mainImageThumbUrl` TEXT, `mainImageUrl` TEXT, `isFavorite` INTEGER NOT NULL, `inBarShelf` INTEGER NOT NULL, `missingIngredientsCount` INTEGER NOT NULL, `tagsJson` TEXT NOT NULL, `utensilsJson` TEXT NOT NULL, `updatedAt` TEXT, PRIMARY KEY(`id`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `barId` INTEGER NOT NULL, `slug` TEXT NOT NULL, `name` TEXT NOT NULL, `shortDescription` TEXT, `instructions` TEXT NOT NULL, `garnish` TEXT, `description` TEXT, `source` TEXT, `abv` REAL, `glassId` INTEGER, `glassName` TEXT, `methodId` INTEGER, `methodName` TEXT, `mainImageThumbUrl` TEXT, `mainImageUrl` TEXT, `imagesJson` TEXT NOT NULL, `isFavorite` INTEGER NOT NULL, `inBarShelf` INTEGER NOT NULL, `missingIngredientsCount` INTEGER NOT NULL, `missingIngredientNamesJson` TEXT NOT NULL, `tagsJson` TEXT NOT NULL, `utensilsJson` TEXT NOT NULL, `author` TEXT, `originBar` TEXT, `year` INTEGER, `updatedAt` TEXT, PRIMARY KEY(`id`))",
         "fields": [
           {
             "fieldPath": "id",
@@ -94,6 +94,12 @@
             "affinity": "TEXT"
           },
           {
+            "fieldPath": "imagesJson",
+            "columnName": "imagesJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
             "fieldPath": "isFavorite",
             "columnName": "isFavorite",
             "affinity": "INTEGER",
@@ -112,6 +118,12 @@
             "notNull": true
           },
           {
+            "fieldPath": "missingIngredientNamesJson",
+            "columnName": "missingIngredientNamesJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
             "fieldPath": "tagsJson",
             "columnName": "tagsJson",
             "affinity": "TEXT",
@@ -122,6 +134,21 @@
             "columnName": "utensilsJson",
             "affinity": "TEXT",
             "notNull": true
+          },
+          {
+            "fieldPath": "author",
+            "columnName": "author",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "originBar",
+            "columnName": "originBar",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "year",
+            "columnName": "year",
+            "affinity": "INTEGER"
           },
           {
             "fieldPath": "updatedAt",
@@ -160,7 +187,7 @@
       },
       {
         "tableName": "cocktail_ingredients",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`cocktailId` INTEGER NOT NULL, `ingredientId` INTEGER NOT NULL, `ingredientSlug` TEXT NOT NULL, `ingredientName` TEXT NOT NULL, `sort` INTEGER NOT NULL, `amount` REAL, `amountMax` REAL, `units` TEXT, `optional` INTEGER NOT NULL, `note` TEXT, `inBarShelf` INTEGER NOT NULL, `substitutesJson` TEXT NOT NULL, PRIMARY KEY(`cocktailId`, `ingredientId`, `sort`), FOREIGN KEY(`cocktailId`) REFERENCES `cocktails`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`cocktailId` INTEGER NOT NULL, `ingredientId` INTEGER NOT NULL, `ingredientSlug` TEXT NOT NULL, `ingredientName` TEXT NOT NULL, `sort` INTEGER NOT NULL, `amount` REAL, `amountMax` REAL, `units` TEXT, `optional` INTEGER NOT NULL, `note` TEXT, `inBarShelf` INTEGER NOT NULL, `inBarShelfAsSubstitute` INTEGER NOT NULL, `inBarShelfAsVariant` INTEGER NOT NULL, `inBarShelfAsComplex` INTEGER NOT NULL, `substitutesJson` TEXT NOT NULL, `isSpecified` INTEGER NOT NULL, PRIMARY KEY(`cocktailId`, `ingredientId`, `sort`), FOREIGN KEY(`cocktailId`) REFERENCES `cocktails`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         "fields": [
           {
             "fieldPath": "cocktailId",
@@ -225,9 +252,33 @@
             "notNull": true
           },
           {
+            "fieldPath": "inBarShelfAsSubstitute",
+            "columnName": "inBarShelfAsSubstitute",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "inBarShelfAsVariant",
+            "columnName": "inBarShelfAsVariant",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "inBarShelfAsComplex",
+            "columnName": "inBarShelfAsComplex",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
             "fieldPath": "substitutesJson",
             "columnName": "substitutesJson",
             "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isSpecified",
+            "columnName": "isSpecified",
+            "affinity": "INTEGER",
             "notNull": true
           }
         ],
@@ -547,6 +598,47 @@
         ]
       },
       {
+        "tableName": "utensils",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `barId` INTEGER NOT NULL, `name` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "barId",
+            "columnName": "barId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_utensils_barId",
+            "unique": false,
+            "columnNames": [
+              "barId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_utensils_barId` ON `${TABLE_NAME}` (`barId`)"
+          }
+        ]
+      },
+      {
         "tableName": "sync_metadata",
         "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key` TEXT NOT NULL, `lastSyncedEpochMillis` INTEGER NOT NULL, PRIMARY KEY(`key`))",
         "fields": [
@@ -573,7 +665,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '7d12abdd1490d172c8a059bb7601dcca')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'cddc51ec3320c0befc81dafcd15a07e1')"
     ]
   }
 }

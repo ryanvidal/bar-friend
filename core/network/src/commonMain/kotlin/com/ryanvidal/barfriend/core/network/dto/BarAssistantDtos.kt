@@ -132,6 +132,7 @@ data class CocktailIngredientDto(
     @SerialName("in_bar_shelf_as_substitute") val inBarShelfAsSubstitute: Boolean = false,
     @SerialName("in_bar_shelf_as_complex_ingredient") val inBarShelfAsComplexIngredient: Boolean = false,
     @SerialName("in_bar_shelf_as_variant") val inBarShelfAsVariant: Boolean = false,
+    @SerialName("is_specified") val isSpecified: Boolean = false,
 )
 
 @Serializable
@@ -156,6 +157,12 @@ data class CocktailDto(
 )
 
 @Serializable
+data class IngredientCategoryDto(
+    val id: Int,
+    val name: String,
+)
+
+@Serializable
 data class IngredientDto(
     val id: Int,
     val slug: String,
@@ -165,4 +172,95 @@ data class IngredientDto(
     val color: String? = null,
     val images: List<ImageDto> = emptyList(),
     @SerialName("in_bar_shelf") val inBarShelf: Boolean = false,
+    @SerialName("category") val category: IngredientCategoryDto? = null,
+    @SerialName("parent_ingredient") val parentIngredient: IngredientBasicDto? = null,
+)
+
+@Serializable
+data class CocktailWriteRequestDto(
+    val name: String,
+    val instructions: String,
+    val description: String? = null,
+    val source: String? = null,
+    val garnish: String? = null,
+    @SerialName("glass_id") val glassId: Int? = null,
+    @SerialName("cocktail_method_id") val methodId: Int? = null,
+    val tags: List<String>,
+    val utensils: List<Int>,
+    val images: List<Int>,
+    val ingredients: List<CocktailIngredientWriteDto>,
+)
+
+@Serializable
+data class CocktailIngredientWriteDto(
+    @SerialName("ingredient_id") val ingredientId: Int,
+    val amount: Double,
+    @SerialName("amount_max") val amountMax: Double? = null,
+    val units: String,
+    val sort: Int,
+    val optional: Boolean,
+    @SerialName("is_specified") val isSpecified: Boolean,
+    val note: String? = null,
+    val substitutes: List<CocktailIngredientSubstituteWriteDto>,
+)
+
+@Serializable
+data class CocktailIngredientSubstituteWriteDto(
+    @SerialName("ingredient_id") val ingredientId: Int,
+    val amount: Double? = null,
+    @SerialName("amount_max") val amountMax: Double? = null,
+    val units: String? = null,
+)
+
+@Serializable
+data class ToggleFavoriteDto(
+    val id: Int,
+    @SerialName("is_favorited") val isFavorited: Boolean,
+)
+
+@Serializable
+data class ScrapeRequestDto(
+    val source: String,
+)
+
+@Serializable
+data class ScrapeResponseDto(
+    @SerialName("schema_version") val schemaVersion: String? = null,
+    val schema: ScrapedSchemaDto,
+    @SerialName("scraper_meta") val scraperMeta: List<ScraperMetaDto> = emptyList(),
+)
+
+@Serializable
+data class ScrapedSchemaDto(
+    val name: String,
+    val description: String? = null,
+    val instructions: String = "",
+    val garnish: String? = null,
+    val source: String? = null,
+    val tags: List<String> = emptyList(),
+    val glass: String? = null,
+    val method: String? = null,
+    val images: List<ScrapedImageDto> = emptyList(),
+    val ingredients: List<ScrapedIngredientDto> = emptyList(),
+)
+
+@Serializable
+data class ScrapedImageDto(
+    val uri: String,
+    val copyright: String? = null,
+)
+
+@Serializable
+data class ScrapedIngredientDto(
+    val name: String,
+    val amount: Double? = null,
+    @SerialName("amount_max") val amountMax: Double? = null,
+    val units: String? = null,
+    val note: String? = null,
+)
+
+@Serializable
+data class ScraperMetaDto(
+    @SerialName("ingredient_name") val ingredientName: String,
+    val source: String? = null,
 )

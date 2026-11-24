@@ -24,6 +24,10 @@ interface CocktailDao {
     @Query("SELECT * FROM cocktails WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
     fun observeCocktails(barId: Int): Flow<List<CocktailEntity>>
 
+    @Transaction
+    @Query("SELECT * FROM cocktails WHERE barId = :barId ORDER BY name COLLATE NOCASE ASC")
+    fun observeCocktailsWithIngredients(barId: Int): Flow<List<CocktailWithIngredients>>
+
     @Query(
         """
         SELECT * FROM cocktails
@@ -37,6 +41,10 @@ interface CocktailDao {
     @Transaction
     @Query("SELECT * FROM cocktails WHERE id = :cocktailId")
     fun observeCocktailWithIngredients(cocktailId: Int): Flow<CocktailWithIngredients?>
+
+    @Transaction
+    @Query("SELECT * FROM cocktails WHERE barId = :barId AND id = :cocktailId")
+    fun observeCocktailWithIngredients(barId: Int, cocktailId: Int): Flow<CocktailWithIngredients?>
 
     @Query("SELECT * FROM cocktail_ingredients WHERE cocktailId = :cocktailId ORDER BY sort ASC")
     fun observeCocktailIngredients(cocktailId: Int): Flow<List<CocktailIngredientEntity>>
@@ -65,8 +73,32 @@ interface CocktailDao {
         }
     }
 
+    @Query("UPDATE cocktails SET isFavorite = :isFavorite WHERE id = :cocktailId")
+    suspend fun updateFavorite(cocktailId: Int, isFavorite: Boolean)
+
+    @Query("UPDATE cocktails SET isFavorite = :isFavorite WHERE barId = :barId AND id = :cocktailId")
+    suspend fun updateFavorite(barId: Int, cocktailId: Int, isFavorite: Boolean)
+
+    @Transaction
+    suspend fun replaceAllCocktailsForBar(
+        barId: Int,
+        cocktails: List<CocktailEntity>,
+        ingredients: List<CocktailIngredientEntity>,
+    ) {
+        deleteCocktailsForBar(barId)
+        if (cocktails.isNotEmpty()) {
+            upsertCocktails(cocktails)
+        }
+        if (ingredients.isNotEmpty()) {
+            upsertCocktailIngredients(ingredients)
+        }
+    }
+
     @Query("DELETE FROM cocktails WHERE id = :cocktailId")
     suspend fun deleteCocktailById(cocktailId: Int)
+
+    @Query("DELETE FROM cocktails WHERE barId = :barId AND id = :cocktailId")
+    suspend fun deleteCocktailById(barId: Int, cocktailId: Int)
 
     @Query("DELETE FROM cocktails WHERE barId = :barId")
     suspend fun deleteCocktailsForBar(barId: Int)

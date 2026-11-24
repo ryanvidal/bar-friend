@@ -2,6 +2,8 @@ package com.ryanvidal.barfriend.core.designsystem
 
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
 val CopperAmber = Color(0xFFE09145)
@@ -52,6 +54,27 @@ val OutlineSubtleLight = Color(0xFFD5C7BD)
 val StatusReadyGreen = Color(0xFF7FB356)
 val StatusSubstituteAmber = Color(0xFFE09145)
 val StatusMissingTerracotta = Color(0xFFD96B52)
+
+@Immutable
+data class BarFriendStatusColors(
+    val ready: Color,
+    val substitute: Color,
+    val missing: Color,
+)
+
+val BarFriendDarkStatusColors = BarFriendStatusColors(
+    ready = StatusReadyGreen,
+    substitute = StatusSubstituteAmber,
+    missing = StatusMissingTerracotta,
+)
+
+val BarFriendLightStatusColors = BarFriendStatusColors(
+    ready = Color(0xFF2B6419),
+    substitute = Color(0xFF8F4700),
+    missing = Color(0xFFB0351E),
+)
+
+val LocalBarFriendStatusColors = staticCompositionLocalOf { BarFriendDarkStatusColors }
 
 val BarFriendDarkColorScheme = darkColorScheme(
     primary = CopperAmber,

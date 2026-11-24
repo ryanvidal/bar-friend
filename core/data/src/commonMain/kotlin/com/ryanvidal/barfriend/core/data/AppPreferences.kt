@@ -1,9 +1,11 @@
 package com.ryanvidal.barfriend.core.data
 
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.ryanvidal.barfriend.core.model.AppThemeMode
@@ -98,6 +100,7 @@ object DataBindings {
     @Provides
     fun providePreferencesDataStore(platformPaths: PlatformPaths): DataStore<Preferences> =
         PreferenceDataStoreFactory.createWithPath(
+            corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
             produceFile = { platformPaths.dataStorePath("bar_friend.preferences_pb").toPath() },
         )
 }
