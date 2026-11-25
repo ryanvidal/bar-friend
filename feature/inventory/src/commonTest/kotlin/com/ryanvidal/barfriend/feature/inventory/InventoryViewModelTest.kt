@@ -1,19 +1,12 @@
 package com.ryanvidal.barfriend.feature.inventory
 
-import com.ryanvidal.barfriend.core.data.CocktailRepository
+import com.ryanvidal.barfriend.core.data.BarSyncCoordinator
 import com.ryanvidal.barfriend.core.data.InventoryRepository
 import com.ryanvidal.barfriend.core.data.SyncStatus
-import com.ryanvidal.barfriend.core.model.BarCatalog
-import com.ryanvidal.barfriend.core.model.CocktailDetail
-import com.ryanvidal.barfriend.core.model.CocktailFilter
-import com.ryanvidal.barfriend.core.model.CocktailSummary
-import com.ryanvidal.barfriend.core.model.CocktailUpsertRequest
 import com.ryanvidal.barfriend.core.model.IngredientSummary
 import com.ryanvidal.barfriend.core.model.RecommendedIngredient
-import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.ShoppingListItem
 import com.ryanvidal.barfriend.core.model.UnlockedCocktail
-import com.ryanvidal.barfriend.core.model.UploadedImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -104,9 +97,9 @@ class InventoryViewModelTest {
     @Test
     fun `filters by search, stock status, category, and prunes stale category on bar switch`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients)
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -140,7 +133,6 @@ class InventoryViewModelTest {
             IngredientSummary(1, "london-dry-gin", "London Dry Gin", 40.0, "Gin", null, true, false),
             IngredientSummary(10, "bourbon", "Bourbon", 45.0, "Whiskey", null, false, false),
         )
-        cocktailRepo.setCatalog(BarCatalog(ingredients = switchedIngredients))
         inventoryRepo.replaceCatalogForBar(switchedIngredients)
         advanceUntilIdle()
 
@@ -156,7 +148,7 @@ class InventoryViewModelTest {
             3 to CompletableDeferred<Result<Unit>>(),
             4 to CompletableDeferred<Result<Unit>>(),
         )
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
             recommendedResult = Result.success(
                 listOf(
@@ -166,7 +158,7 @@ class InventoryViewModelTest {
             )
             setInBarShelfHook = { id, _ -> gates.getValue(id).await() }
         }
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -221,9 +213,9 @@ class InventoryViewModelTest {
     @Test
     fun `shopping list add, quantity stepper with decrement-to-remove, remove, markPurchased, and bulk actions`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients)
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -304,7 +296,7 @@ class InventoryViewModelTest {
     @Test
     fun `openUnlockedCocktails handles success, live shelf sync, and error state`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
             unlockedCocktailsMap[3] = Result.success(
                 listOf(
@@ -314,7 +306,7 @@ class InventoryViewModelTest {
             )
             unlockedCocktailsMap[4] = Result.failure(IllegalStateException("Server timeout"))
         }
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -359,7 +351,7 @@ class InventoryViewModelTest {
         // refreshAll invokes syncAll, syncShoppingList, and recommendations reload
         viewModel.refreshAll()
         advanceUntilIdle()
-        assertEquals(1, cocktailRepo.syncAllCalls)
+        assertEquals(1, syncCoordinator.syncAllCalls)
         assertEquals(1, inventoryRepo.syncShoppingListCalls)
     }
 
@@ -370,11 +362,11 @@ class InventoryViewModelTest {
             3 to CompletableDeferred<Result<Unit>>(),
             4 to CompletableDeferred<Result<Unit>>(),
         )
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
             updateQuantityHook = { id, _ -> gates.getValue(id).await() }
         }
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -412,7 +404,7 @@ class InventoryViewModelTest {
     @Test
     fun `deduplicates recommendations and unlocked cocktails and enriches missing recommendation metadata`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
             recommendedResult = Result.success(
                 listOf(
@@ -447,7 +439,7 @@ class InventoryViewModelTest {
                 ),
             )
         }
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -468,24 +460,24 @@ class InventoryViewModelTest {
     @Test
     fun `isRefreshing stays false when only syncStatus isSyncing is true`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients)
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
         }
         advanceUntilIdle()
 
-        cocktailRepo.setSyncStatus(SyncStatus(isSyncing = true))
+        syncCoordinator.setSyncStatus(SyncStatus(isSyncing = true))
         testDispatcher.scheduler.runCurrent()
 
         assertTrue(viewModel.uiState.value.syncStatus.isSyncing)
         assertFalse(viewModel.uiState.value.isRefreshing)
 
         val syncGate = CompletableDeferred<Result<Unit>>()
-        cocktailRepo.syncAllHook = { syncGate.await() }
-        cocktailRepo.setSyncStatus(SyncStatus(isSyncing = false))
+        syncCoordinator.syncAllHook = { syncGate.await() }
+        syncCoordinator.setSyncStatus(SyncStatus(isSyncing = false))
 
         viewModel.refreshAll()
         testDispatcher.scheduler.runCurrent()
@@ -499,13 +491,13 @@ class InventoryViewModelTest {
     @Test
     fun `markAllPurchased and clearShoppingList reject while per-item ops or pending quantities are in flight`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val shelfGate = CompletableDeferred<Result<Unit>>()
         val shoppingGate = CompletableDeferred<Result<Unit>>()
         val purchaseGate = CompletableDeferred<Result<Unit>>()
         val quantityGate = CompletableDeferred<Result<Unit>>()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients)
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -595,12 +587,12 @@ class InventoryViewModelTest {
     @Test
     fun `rapid coalesced updateQuantity taps send only final quantity and decrement to zero hides immediately`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val removeGate = CompletableDeferred<Result<Unit>>()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
             removeFromShoppingListHook = { removeGate.await() }
         }
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -645,14 +637,14 @@ class InventoryViewModelTest {
         val firstGate = CompletableDeferred<Result<Unit>>()
         val secondGate = CompletableDeferred<Result<Unit>>()
         var callCount = 0
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
             updateQuantityHook = { _, _ ->
                 callCount += 1
                 if (callCount == 1) firstGate.await() else secondGate.await()
             }
         }
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -688,9 +680,9 @@ class InventoryViewModelTest {
     @Test
     fun `converged optimistic overrides do not snap back when Room emission lags after success`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients)
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -760,11 +752,11 @@ class InventoryViewModelTest {
     @Test
     fun `failure paths emit snackbars, set recommendation errors, and roll back optimistic states`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
             recommendedResult = Result.failure(IllegalStateException("Recommendations down"))
         }
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -832,7 +824,7 @@ class InventoryViewModelTest {
         inventoryRepo.markPurchasedHook = null
 
         // refreshAll syncAll failure
-        cocktailRepo.syncAllResult = Result.failure(IllegalStateException("Server offline"))
+        syncCoordinator.syncAllResult = Result.failure(IllegalStateException("Server offline"))
         viewModel.refreshAll()
         advanceUntilIdle()
         assertFalse(viewModel.uiState.value.isRefreshing)
@@ -844,13 +836,13 @@ class InventoryViewModelTest {
         val ingredients = sampleIngredients()
         val gate3 = CompletableDeferred<Result<List<UnlockedCocktail>>>()
         val gate4 = CompletableDeferred<Result<List<UnlockedCocktail>>>()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
             getUnlockedCocktailsHook = { id ->
                 if (id == 3) gate3.await() else gate4.await()
             }
         }
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -885,9 +877,9 @@ class InventoryViewModelTest {
 
     @Test
     fun `empty catalog defers recommendations until populated and refreshAll executes syncAll then syncShoppingList sequentially`() = runTest(testDispatcher) {
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog())
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = emptyList())
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -912,13 +904,13 @@ class InventoryViewModelTest {
         // Sequential refreshAll verification
         val syncGate = CompletableDeferred<Result<Unit>>()
         val shoppingGate = CompletableDeferred<Result<Unit>>()
-        cocktailRepo.syncAllHook = { syncGate.await() }
+        syncCoordinator.syncAllHook = { syncGate.await() }
         inventoryRepo.syncShoppingListHook = { shoppingGate.await() }
 
         viewModel.refreshAll()
         testDispatcher.scheduler.runCurrent()
 
-        assertEquals(1, cocktailRepo.syncAllCalls)
+        assertEquals(1, syncCoordinator.syncAllCalls)
         assertEquals(0, inventoryRepo.syncShoppingListCalls)
         assertEquals(2, inventoryRepo.getRecommendedCalls)
 
@@ -935,7 +927,7 @@ class InventoryViewModelTest {
         assertFalse(viewModel.uiState.value.isRefreshing)
 
         // syncAll failure skips syncShoppingList and recommendations
-        cocktailRepo.syncAllHook = { Result.failure(IllegalStateException("Auth expired")) }
+        syncCoordinator.syncAllHook = { Result.failure(IllegalStateException("Auth expired")) }
         viewModel.refreshAll()
         advanceUntilIdle()
 
@@ -947,11 +939,11 @@ class InventoryViewModelTest {
     @Test
     fun `monotonic snackbar events emit distinct ids for identical messages and consumeSnackbar checks id`() = runTest(testDispatcher) {
         val ingredients = sampleIngredients()
-        val cocktailRepo = FakeCocktailRepository(initialCatalog = BarCatalog(ingredients = ingredients))
+        val syncCoordinator = FakeBarSyncCoordinator()
         val inventoryRepo = FakeInventoryRepository(initialIngredients = ingredients).apply {
             setInBarShelfHook = { _, _ -> Result.failure(IllegalStateException("Network error")) }
         }
-        val viewModel = InventoryViewModel(inventoryRepo, cocktailRepo)
+        val viewModel = InventoryViewModel(inventoryRepo, syncCoordinator)
 
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.uiState.collect {}
@@ -1215,66 +1207,21 @@ private class FakeInventoryRepository(
     }
 }
 
-private class FakeCocktailRepository(
-    initialCatalog: BarCatalog = BarCatalog(),
-) : CocktailRepository {
+private class FakeBarSyncCoordinator : BarSyncCoordinator {
     private val _syncStatus = MutableStateFlow(SyncStatus())
     override val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
-    private val catalogFlow = MutableStateFlow(initialCatalog)
 
     var syncAllCalls = 0
     var syncAllResult: Result<Unit> = Result.success(Unit)
     var syncAllHook: (suspend () -> Result<Unit>)? = null
 
-    fun setCatalog(catalog: BarCatalog) {
-        catalogFlow.value = catalog
-    }
-
     fun setSyncStatus(status: SyncStatus) {
         _syncStatus.value = status
     }
-
-    override fun observeCocktails(filter: CocktailFilter): Flow<List<CocktailSummary>> =
-        flowOf(emptyList())
-
-    override fun observeCocktailDetail(cocktailId: Int): Flow<CocktailDetail?> =
-        flowOf(null)
-
-    override fun observeCatalog(): Flow<BarCatalog> = catalogFlow
 
     override suspend fun syncAll(force: Boolean): Result<Unit> {
         syncAllCalls += 1
         syncAllHook?.let { hook -> return hook() }
         return syncAllResult
     }
-
-    override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> =
-        Result.failure(UnsupportedOperationException())
-
-    override suspend fun toggleFavorite(cocktailId: Int): Result<Boolean> =
-        Result.failure(UnsupportedOperationException())
-
-    override suspend fun saveCocktail(
-        cocktailId: Int?,
-        request: CocktailUpsertRequest,
-    ): Result<CocktailDetail> = Result.failure(UnsupportedOperationException())
-
-    override suspend fun deleteCocktail(cocktailId: Int): Result<Unit> =
-        Result.failure(UnsupportedOperationException())
-
-    override suspend fun uploadImage(
-        bytes: ByteArray,
-        fileName: String,
-        mimeType: String?,
-        sort: Int,
-    ): Result<UploadedImage> = Result.failure(UnsupportedOperationException())
-
-    override suspend fun uploadImageFromUrl(
-        imageUrl: String,
-        copyright: String?,
-        sort: Int,
-    ): Result<UploadedImage> = Result.failure(UnsupportedOperationException())
-
-    override suspend fun scrapeRecipeFromUrl(url: String): Result<ScrapedCocktail> =
-        Result.failure(UnsupportedOperationException())
 }

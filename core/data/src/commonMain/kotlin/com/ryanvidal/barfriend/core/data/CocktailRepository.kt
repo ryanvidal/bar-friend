@@ -8,23 +8,12 @@ import com.ryanvidal.barfriend.core.model.CocktailUpsertRequest
 import com.ryanvidal.barfriend.core.model.ScrapedCocktail
 import com.ryanvidal.barfriend.core.model.UploadedImage
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.StateFlow
-
-data class SyncStatus(
-    val isSyncing: Boolean = false,
-    val lastSyncedEpochMillis: Long? = null,
-    val errorMessage: String? = null,
-)
 
 interface CocktailRepository {
-    val syncStatus: StateFlow<SyncStatus>
-
     fun observeCocktails(filter: CocktailFilter): Flow<List<CocktailSummary>>
     fun observeCocktailDetail(cocktailId: Int): Flow<CocktailDetail?>
     fun observeCatalog(): Flow<BarCatalog>
 
-    suspend fun syncAll(force: Boolean = false): Result<Unit>
-    suspend fun syncAllSilent(force: Boolean = false): Result<Unit> = syncAll(force = force)
     suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail>
     suspend fun toggleFavorite(cocktailId: Int): Result<Boolean>
     suspend fun saveCocktail(cocktailId: Int?, request: CocktailUpsertRequest): Result<CocktailDetail>

@@ -3,6 +3,7 @@ package com.ryanvidal.barfriend.feature.cocktails
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
+import com.ryanvidal.barfriend.core.data.BarSyncCoordinator
 import com.ryanvidal.barfriend.core.data.CocktailRepository
 import com.ryanvidal.barfriend.core.data.SyncStatus
 import com.ryanvidal.barfriend.core.model.BarCatalog
@@ -60,14 +61,32 @@ internal data class SaveCocktailCall(
     val request: CocktailUpsertRequest,
 )
 
+internal class FakeBarSyncCoordinator(
+    initialStatus: SyncStatus = SyncStatus(),
+) : BarSyncCoordinator {
+    private val _syncStatus = MutableStateFlow(initialStatus)
+    override val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
+
+    var syncAllCalls = 0
+    var syncAllResult: Result<Unit> = Result.success(Unit)
+    var syncAllHook: (suspend () -> Result<Unit>)? = null
+
+    fun setSyncStatus(status: SyncStatus) {
+        _syncStatus.value = status
+    }
+
+    override suspend fun syncAll(force: Boolean): Result<Unit> {
+        syncAllCalls += 1
+        syncAllHook?.let { hook -> return hook() }
+        return syncAllResult
+    }
+}
+
 internal class FakeCocktailRepository(
     initialCocktails: List<CocktailSummary> = emptyList(),
     initialDetails: Map<Int, CocktailDetail> = emptyMap(),
     initialCatalog: BarCatalog = sampleCatalog(),
 ) : CocktailRepository {
-    private val _syncStatus = MutableStateFlow(SyncStatus())
-    override val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
-
     private val cocktailsFlow = MutableStateFlow(initialCocktails)
     private val detailsFlow = MutableStateFlow(initialDetails)
     private val catalogFlow = MutableStateFlow(initialCatalog)
@@ -91,7 +110,6 @@ internal class FakeCocktailRepository(
     val localUploads = mutableListOf<LocalUploadCall>()
     val remoteUploads = mutableListOf<RemoteUploadCall>()
     val saveCalls = mutableListOf<SaveCocktailCall>()
-    var syncAllCalls = 0
     var activeDetailObserverCount = 0
         private set
 
@@ -110,10 +128,6 @@ internal class FakeCocktailRepository(
 
     fun setCocktails(items: List<CocktailSummary>) {
         cocktailsFlow.value = items
-    }
-
-    fun setSyncStatus(status: SyncStatus) {
-        _syncStatus.value = status
     }
 
     override fun observeCocktails(filter: CocktailFilter): Flow<List<CocktailSummary>> =
@@ -156,11 +170,6 @@ internal class FakeCocktailRepository(
             .onCompletion { activeDetailObserverCount -= 1 }
 
     override fun observeCatalog(): Flow<BarCatalog> = catalogFlow
-
-    override suspend fun syncAll(force: Boolean): Result<Unit> {
-        syncAllCalls += 1
-        return Result.success(Unit)
-    }
 
     override suspend fun refreshCocktail(cocktailId: Int): Result<CocktailDetail> {
         refreshedCocktailIds += cocktailId

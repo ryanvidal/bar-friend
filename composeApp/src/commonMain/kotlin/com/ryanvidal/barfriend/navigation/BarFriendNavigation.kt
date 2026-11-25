@@ -122,7 +122,10 @@ internal fun MainShell(
                 entryProvider<NavKey> {
                     entry<CocktailsListRoute> {
                         val listViewModel = viewModel(key = "cocktails_list_$sessionScopeKey") {
-                            CocktailsListViewModel(appGraph.cocktailRepository)
+                            CocktailsListViewModel(
+                                cocktailRepository = appGraph.cocktailRepository,
+                                syncCoordinator = appGraph.barSyncCoordinator,
+                            )
                         }
                         CocktailsListScreen(
                             viewModel = listViewModel,
@@ -203,7 +206,7 @@ internal fun MainShell(
                         val inventoryViewModel = viewModel(key = "inventory_$sessionScopeKey") {
                             InventoryViewModel(
                                 inventoryRepository = appGraph.inventoryRepository,
-                                cocktailRepository = appGraph.cocktailRepository,
+                                syncCoordinator = appGraph.barSyncCoordinator,
                             )
                         }
                         InventoryScreen(
@@ -221,7 +224,7 @@ internal fun MainShell(
                                 appPreferences = appGraph.appPreferences,
                                 sessionRepository = appGraph.sessionRepository,
                                 authRepository = appGraph.authRepository,
-                                cocktailRepository = appGraph.cocktailRepository,
+                                syncCoordinator = appGraph.barSyncCoordinator,
                             )
                         }
                         SettingsScreen(viewModel = settingsViewModel)
